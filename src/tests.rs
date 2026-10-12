@@ -1,37 +1,9 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use std::path::Path;
 
-use ratatui::{Terminal, backend::TestBackend};
+use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
 use super::*;
-
-struct TestDirectory(PathBuf);
-
-impl TestDirectory {
-    fn new() -> Self {
-        static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "jks-tui-test-{}-{}",
-            std::process::id(),
-            NEXT_ID.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&path).unwrap();
-        Self(path)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TestDirectory {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
+use test_support::{KEYTOOL_JKS, TestDirectory, empty_keystore, mixed_keystore};
 
 fn browsing(directory: &Path) -> App {
     App {
@@ -44,17 +16,34 @@ fn press(app: &mut App, code: KeyCode) -> bool {
     app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
 }
 
-fn screen(app: &mut App, width: u16, height: u16) -> String {
+fn buffer(app: &mut App, width: u16, height: u16) -> Buffer {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal.draw(|frame| app.draw(frame)).unwrap();
-    terminal
-        .backend()
-        .buffer()
+    terminal.backend().buffer().clone()
+}
+
+fn screen(app: &mut App, width: u16, height: u16) -> String {
+    buffer(app, width, height)
         .content
         .chunks(usize::from(width))
         .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn red_text(app: &mut App) -> String {
+    buffer(app, 200, 24)
+        .content
+        .iter()
+        .filter(|cell| cell.fg == Color::Red)
+        .map(|cell| cell.symbol())
+        .collect()
+}
+
+fn type_password(app: &mut App, password: &str) {
+    for ch in password.chars() {
+        assert!(!press(app, KeyCode::Char(ch)));
+    }
 }
 
 #[test]
@@ -75,10 +64,11 @@ fn browser_shows_directories_then_only_jks_files() {
 }
 
 #[test]
-fn selecting_a_keystore_displays_its_absolute_path_without_parsing() {
+fn selecting_a_valid_empty_keystore_displays_its_absolute_path() {
     let directory = TestDirectory::new();
     let path = directory.path().join("my keystore-ü.JKS");
-    fs::write(&path, "not a valid keystore").unwrap();
+    let data = empty_keystore();
+    fs::write(&path, &data).unwrap();
     let mut app = browsing(directory.path());
 
     press(&mut app, KeyCode::End);
@@ -88,7 +78,9 @@ fn selecting_a_keystore_displays_its_absolute_path_without_parsing() {
     assert_eq!(app.keystore_path.as_deref(), Some(expected.as_path()));
     assert!(app.file_picker.is_none());
     assert!(screen(&mut app, 200, 24).contains(expected.to_str().unwrap()));
-    assert_eq!(fs::read_to_string(&path).unwrap(), "not a valid keystore");
+    assert!(screen(&mut app, 200, 24).contains("This keystore contains no entries."));
+    assert!(app.password_prompt.is_none());
+    assert_eq!(fs::read(&path).unwrap(), data);
 }
 
 #[test]
@@ -97,7 +89,7 @@ fn directories_can_be_entered_and_left_before_selecting() {
     let nested = directory.path().join("nested");
     fs::create_dir(&nested).unwrap();
     let path = nested.join("nested-keystore.jks");
-    fs::write(&path, "").unwrap();
+    fs::write(&path, empty_keystore()).unwrap();
     let mut app = browsing(directory.path());
 
     press(&mut app, KeyCode::Down);
@@ -127,8 +119,8 @@ fn directories_can_be_entered_and_left_before_selecting() {
 fn reopening_and_cancelling_preserves_the_previous_keystore() {
     let directory = TestDirectory::new();
     let original = directory.path().join("a.jks");
-    fs::write(&original, "").unwrap();
-    fs::write(directory.path().join("b.jks"), "").unwrap();
+    fs::write(&original, empty_keystore()).unwrap();
+    fs::write(directory.path().join("b.jks"), empty_keystore()).unwrap();
     let original = original.canonicalize().unwrap();
     let mut app = App {
         keystore_path: Some(original.clone()),
@@ -155,7 +147,7 @@ fn reopening_and_cancelling_preserves_the_previous_keystore() {
 fn a_missing_file_reports_an_error_and_allows_recovery() {
     let directory = TestDirectory::new();
     let path = directory.path().join("removed.jks");
-    fs::write(&path, "").unwrap();
+    fs::write(&path, empty_keystore()).unwrap();
     let mut app = browsing(directory.path());
     press(&mut app, KeyCode::End);
     fs::remove_file(&path).unwrap();
@@ -165,7 +157,7 @@ fn a_missing_file_reports_an_error_and_allows_recovery() {
     assert!(app.file_picker.is_some());
     assert!(screen(&mut app, 200, 24).contains("Could not open selection"));
 
-    fs::write(&path, "").unwrap();
+    fs::write(&path, empty_keystore()).unwrap();
     press(&mut app, KeyCode::Enter);
     assert_eq!(app.keystore_path, Some(path.canonicalize().unwrap()));
 }
@@ -202,4 +194,144 @@ fn empty_directories_and_small_terminals_are_handled() {
     assert!(!press(&mut app, KeyCode::Esc));
     assert!(app.file_picker.is_none());
     assert!(press(&mut app, KeyCode::Esc));
+}
+
+#[test]
+fn invalid_file_shows_a_red_error_and_valid_selection_recovers() {
+    let directory = TestDirectory::new();
+    fs::write(directory.path().join("a-invalid.jks"), "not a keystore").unwrap();
+    fs::write(directory.path().join("b-valid.jks"), mixed_keystore()).unwrap();
+    let mut app = browsing(directory.path());
+
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+    assert!(app.file_picker.is_none());
+    assert!(app.password_prompt.is_none());
+    assert!(app.keystore_path.is_none());
+    assert!(red_text(&mut app).contains("not a valid JKS keystore"));
+
+    app.file_picker = Some(FilePicker::new(directory.path()).unwrap());
+    press(&mut app, KeyCode::End);
+    press(&mut app, KeyCode::Enter);
+    assert!(app.password_prompt.is_some());
+    assert!(app.error.is_none());
+    type_password(&mut app, "changeit");
+    press(&mut app, KeyCode::Enter);
+    assert!(app.password_prompt.is_none());
+    let content = screen(&mut app, 100, 24);
+    for expected in [
+        "root-cert",
+        "Trusted certificate",
+        "server-key",
+        "Private key",
+        "2 entries",
+    ] {
+        assert!(content.contains(expected), "missing {expected}");
+    }
+    assert!(red_text(&mut app).is_empty());
+}
+
+#[test]
+fn password_is_masked_and_failed_verification_can_be_retried() {
+    let directory = TestDirectory::new();
+    fs::write(directory.path().join("valid.jks"), mixed_keystore()).unwrap();
+    let mut app = browsing(directory.path());
+    press(&mut app, KeyCode::End);
+    press(&mut app, KeyCode::Enter);
+    type_password(&mut app, "wrong-q");
+    let content = screen(&mut app, 100, 24);
+    assert!(content.contains("Password: *******"));
+    assert!(!content.contains("wrong-q"));
+
+    press(&mut app, KeyCode::Enter);
+    assert!(app.keystore_path.is_none());
+    assert!(app.entries.is_empty());
+    assert!(app.password_prompt.as_ref().unwrap().password.0.is_empty());
+    assert!(red_text(&mut app).contains("Incorrect password or keystore integrity check failed"));
+    assert!(!screen(&mut app, 100, 24).contains("root-cert"));
+
+    type_password(&mut app, "changeit!");
+    press(&mut app, KeyCode::Backspace);
+    press(&mut app, KeyCode::Enter);
+    assert!(app.password_prompt.is_none());
+    assert_eq!(app.entries.len(), 2);
+    assert!(app.error.is_none());
+}
+
+#[test]
+fn truncated_files_are_rejected_before_the_password_prompt() {
+    let directory = TestDirectory::new();
+    fs::write(
+        directory.path().join("truncated.jks"),
+        &KEYTOOL_JKS[..KEYTOOL_JKS.len() - 1],
+    )
+    .unwrap();
+    let mut app = browsing(directory.path());
+    press(&mut app, KeyCode::End);
+    press(&mut app, KeyCode::Enter);
+    assert!(app.password_prompt.is_none());
+    assert!(app.keystore_path.is_none());
+    assert!(red_text(&mut app).contains("not a valid JKS keystore"));
+}
+
+#[test]
+fn cancelling_a_password_prompt_preserves_the_loaded_entries() {
+    let directory = TestDirectory::new();
+    let original = directory.path().join("a-original.jks");
+    fs::write(&original, mixed_keystore()).unwrap();
+    fs::write(directory.path().join("b-other.jks"), KEYTOOL_JKS).unwrap();
+    let mut app = browsing(directory.path());
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+    type_password(&mut app, "changeit");
+    press(&mut app, KeyCode::Enter);
+
+    press(&mut app, KeyCode::Char('o'));
+    press(&mut app, KeyCode::End);
+    press(&mut app, KeyCode::Enter);
+    type_password(&mut app, "partial");
+    assert!(!press(&mut app, KeyCode::Esc));
+    assert!(app.password_prompt.is_none());
+    assert_eq!(app.keystore_path, Some(original.canonicalize().unwrap()));
+    assert_eq!(app.entries.len(), 2);
+    assert!(screen(&mut app, 100, 24).contains("server-key"));
+
+    press(&mut app, KeyCode::Char('o'));
+    press(&mut app, KeyCode::End);
+    press(&mut app, KeyCode::Enter);
+    assert!(app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+}
+
+#[test]
+fn a_read_failure_is_reported_in_red_without_losing_the_loaded_keystore() {
+    let directory = TestDirectory::new();
+    let original = directory.path().join("original.jks");
+    fs::write(&original, empty_keystore()).unwrap();
+    let mut app = App::default();
+    app.open_file(original.clone());
+    app.open_file(directory.path().join("missing.jks"));
+    assert!(red_text(&mut app).contains("Cannot read"));
+    assert_eq!(app.keystore_path, Some(original));
+    assert!(app.password_prompt.is_none());
+}
+
+#[test]
+fn entry_list_scrolls_to_entries_below_the_viewport() {
+    let directory = TestDirectory::new();
+    let mut app = App::default();
+    app.show_entries(
+        directory.path().join("many.jks"),
+        (0..40)
+            .map(|index| KeystoreEntry {
+                alias: format!("entry-{index:02}"),
+                kind: "Trusted certificate",
+            })
+            .collect(),
+    );
+    assert!(!screen(&mut app, 100, 20).contains("entry-39"));
+    for _ in 0..39 {
+        press(&mut app, KeyCode::Down);
+        screen(&mut app, 100, 20);
+    }
+    assert!(screen(&mut app, 100, 20).contains("entry-39"));
 }
