@@ -1,0 +1,12 @@
+[package]
+name = "jks-tui"
+version = "0.1.0"
+edition = "2024"
+description = "TUI for Java KeyStore files"
+license = "Apache-2.0"
+repository = "https://github.com/codecraft21/jks-tui"
+
+[dependencies]
+# Optional PKCS12 support currently resolves to an incompatible p12-keystore API.
+jks = { version = "0.3.3", default-features = false, features = ["rand"] }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
