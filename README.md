@@ -2,9 +2,9 @@
 
 TUI for Java KeyStore files, built with Rust and Ratatui.
 
-Open a `.jks` file with the built-in terminal file browser to display its full,
-absolute path. The file's contents are not read or parsed yet; the `jks`
-dependency is included for future KeyStore support.
+Open a `.jks` file with the built-in terminal file browser, validate it with the
+`jks` crate, and list its entry aliases and types (private keys or trusted
+certificates).
 
 ## Run
 
@@ -28,9 +28,22 @@ and `.jks` files (case-insensitive) are shown, with directories first.
 | `Left` / `Backspace` or `Enter` on `../` | Go to the parent directory |
 | `Esc` | Cancel and keep the previous selection |
 
-After selection, the main view displays the keystore's absolute path. Press `q`
-or `Ctrl+C` to quit from either view, or `Esc` to quit from the main view. The app
-restores the terminal when it exits.
+After selection, enter the keystore password when prompted and press `Enter` to
+verify it. Input is masked; `Backspace` deletes a character and `Esc` cancels.
+Empty-password keystores open immediately. The main view shows the keystore's
+absolute path and a list of entry aliases and types. Use `Up` / `Down` or `j` / `k`
+to scroll the entries, or `o` to open another file. Cancelling the browser or the
+password prompt keeps the previously loaded keystore.
+
+The app checks the JKS header and structure before asking for a password. Entries
+are shown only after the password-based integrity check succeeds. Invalid files,
+unreadable files, and failed integrity checks produce a red error in the TUI.
+Private keys are neither decrypted nor displayed. Only the JKS format is supported;
+PKCS#12 files renamed to `.jks` are rejected.
+
+Press `q` to quit from the browser or main view, `Esc` to quit from the main view,
+or `Ctrl+C` to quit from any view (including the password prompt). The app restores
+the terminal when it exits.
 
 ## Development
 
