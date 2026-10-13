@@ -6,7 +6,11 @@ mod test_support;
 #[cfg(test)]
 mod tests;
 
-use std::{fs, io, path::PathBuf};
+use std::{
+    fs::File,
+    io::{self, Read},
+    path::{Path, PathBuf},
+};
 
 use jks::KeyStoreError;
 use ratatui::{
@@ -18,15 +22,40 @@ use ratatui::{
 };
 
 use file_picker::FilePicker;
-use keystore::{KeystoreEntry, load_entries};
+use keystore::{Keystore, KeystoreEntry};
+use zeroize::Zeroize;
 
-#[derive(Default)]
+/// Real keystores are far smaller; refuse to read arbitrarily large files.
+const MAX_KEYSTORE_SIZE: u64 = 64 * 1024 * 1024;
+
+/// Grows its buffer manually so no reallocation leaves a stale copy behind.
 struct Password(String);
 
+impl Default for Password {
+    fn default() -> Self {
+        Self(String::with_capacity(64))
+    }
+}
+
 impl Password {
+    fn push(&mut self, ch: char) {
+        if self.0.len() + ch.len_utf8() > self.0.capacity() {
+            let mut grown = String::with_capacity(self.0.capacity() * 2 + ch.len_utf8());
+            grown.push_str(&self.0);
+            self.0.zeroize();
+            self.0 = grown;
+        }
+        self.0.push(ch);
+    }
+
+    fn pop(&mut self) {
+        // Removed bytes stay in spare capacity until `clear` wipes it.
+        self.0.pop();
+    }
+
     fn clear(&mut self) {
-        let mut bytes = std::mem::take(&mut self.0).into_bytes();
-        jks::zeroing(&mut bytes);
+        // Zeroes the whole allocation, including spare capacity.
+        self.0.zeroize();
     }
 }
 
@@ -38,7 +67,7 @@ impl Drop for Password {
 
 struct PasswordPrompt {
     path: PathBuf,
-    data: Vec<u8>,
+    keystore: Keystore,
     password: Password,
 }
 
@@ -96,22 +125,23 @@ impl App {
             return;
         };
         match key.code {
+            // Windows reports AltGr as Ctrl+Alt, so only Ctrl or Alt alone is
+            // treated as a shortcut rather than typed text.
             KeyCode::Char(ch)
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    == key.modifiers.contains(KeyModifiers::ALT) =>
             {
-                prompt.password.0.push(ch);
+                prompt.password.push(ch);
             }
-            KeyCode::Backspace => {
-                prompt.password.0.pop();
-            }
+            KeyCode::Backspace => prompt.password.pop(),
             KeyCode::Enter => {
-                let result = load_entries(&prompt.data, &prompt.password.0);
-                let path = prompt.path.clone();
+                let result = prompt.keystore.verify(&prompt.password.0);
                 prompt.password.clear();
                 match result {
-                    Ok(entries) => self.show_entries(path, entries),
+                    Ok(()) => {
+                        let prompt = self.password_prompt.take().unwrap();
+                        self.show_entries(prompt.path, prompt.keystore.into_entries());
+                    }
                     Err(KeyStoreError::InvalidDigest) => {
                         self.error = Some(
                             "Incorrect password or keystore integrity check failed. Try again or press Esc."
@@ -129,21 +159,31 @@ impl App {
 
     fn open_file(&mut self, path: PathBuf) {
         self.error = None;
-        let data = match fs::read(&path) {
+        let data = match read_limited(&path, MAX_KEYSTORE_SIZE) {
             Ok(data) => data,
             Err(error) => {
                 self.error = Some(format!("Cannot read {}: {error}", path.display()));
                 return;
             }
         };
-        // Parse the entire structure before prompting. Empty-password stores
-        // can be verified immediately; other stores require their password.
-        match load_entries(&data, "") {
-            Ok(entries) => self.show_entries(path, entries),
+        // Parse the entire structure once, before prompting. Empty-password
+        // stores are verified immediately; others require their password.
+        let keystore = match keystore::parse(data) {
+            Ok(keystore) => keystore,
+            Err(error) => {
+                self.error = Some(format!(
+                    "{} is not a valid JKS keystore: {error}",
+                    path.display()
+                ));
+                return;
+            }
+        };
+        match keystore.verify("") {
+            Ok(()) => self.show_entries(path, keystore.into_entries()),
             Err(KeyStoreError::InvalidDigest) => {
                 self.password_prompt = Some(PasswordPrompt {
                     path,
-                    data,
+                    keystore,
                     password: Password::default(),
                 });
             }
@@ -251,6 +291,17 @@ impl App {
             frame.render_widget(Paragraph::new(shortcuts), help);
         }
     }
+}
+
+fn read_limited(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    let mut data = Vec::new();
+    File::open(path)?.take(limit + 1).read_to_end(&mut data)?;
+    if data.len() as u64 > limit {
+        return Err(io::Error::other(format!(
+            "file is larger than the {limit}-byte keystore limit"
+        )));
+    }
+    Ok(data)
 }
 
 fn main() -> io::Result<()> {
