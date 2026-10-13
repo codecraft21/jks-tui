@@ -8,6 +8,8 @@ use std::{
 use jks::{KeyStore, KeyStoreOptions, PrivateKeyEntry};
 
 pub const KEYTOOL_JKS: &[u8] = include_bytes!("../tests/fixtures/trusted-cert.jks");
+pub const UNICODE_PASSWORD_JKS: &[u8] = include_bytes!("../tests/fixtures/unicode-password.jks");
+pub const UNICODE_ALIAS_JKS: &[u8] = include_bytes!("../tests/fixtures/unicode-alias.jks");
 
 pub struct TestDirectory {
     pub path: PathBuf,

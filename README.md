@@ -3,7 +3,7 @@
 TUI for Java KeyStore files, built with Rust and Ratatui.
 
 Open a `.jks` file with the built-in terminal file browser, validate it with the
-`jks` crate, and list its entry aliases and types (private keys or trusted
+bounded JKS reader, and list its entry aliases and types (private keys or trusted
 certificates).
 
 ## Run
@@ -35,11 +35,13 @@ absolute path and a list of entry aliases and types. Use `Up` / `Down` or `j` / 
 to scroll the entries, or `o` to open another file. Cancelling the browser or the
 password prompt keeps the previously loaded keystore.
 
-The app checks the JKS header and structure before asking for a password. Entries
-are shown only after the password-based integrity check succeeds. Invalid files,
-unreadable files, and failed integrity checks produce a red error in the TUI.
-Private keys are neither decrypted nor displayed. Only the JKS format is supported;
-PKCS#12 files renamed to `.jks` are rejected.
+The app checks the JKS header, lengths, counts, and structure before asking for a
+password. Entries are shown only after the password-based integrity check
+succeeds. Invalid files, unreadable files, and failed integrity checks produce a
+red error in the TUI. Java Unicode passwords and aliases (including supplementary
+characters such as emoji) are supported. Private keys are neither decrypted nor
+displayed. Only the JKS format is supported; PKCS#12 files renamed to `.jks` are
+rejected.
 
 Press `q` to quit from the browser or main view, `Esc` to quit from the main view,
 or `Ctrl+C` to quit from any view (including the password prompt). The app restores
