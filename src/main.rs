@@ -107,7 +107,7 @@ impl App {
                 prompt.password.0.pop();
             }
             KeyCode::Enter => {
-                let result = load_entries(&prompt.data, prompt.password.0.as_bytes());
+                let result = load_entries(&prompt.data, &prompt.password.0);
                 let path = prompt.path.clone();
                 prompt.password.clear();
                 match result {
@@ -138,7 +138,7 @@ impl App {
         };
         // Parse the entire structure before prompting. Empty-password stores
         // can be verified immediately; other stores require their password.
-        match load_entries(&data, b"") {
+        match load_entries(&data, "") {
             Ok(entries) => self.show_entries(path, entries),
             Err(KeyStoreError::InvalidDigest) => {
                 self.password_prompt = Some(PasswordPrompt {

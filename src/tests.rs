@@ -3,7 +3,10 @@ use std::path::Path;
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
 use super::*;
-use test_support::{KEYTOOL_JKS, TestDirectory, empty_keystore, mixed_keystore};
+use test_support::{
+    KEYTOOL_JKS, TestDirectory, UNICODE_ALIAS_JKS, UNICODE_PASSWORD_JKS, empty_keystore,
+    mixed_keystore,
+};
 
 fn browsing(directory: &Path) -> App {
     App {
@@ -44,6 +47,62 @@ fn type_password(app: &mut App, password: &str) {
     for ch in password.chars() {
         assert!(!press(app, KeyCode::Char(ch)));
     }
+}
+
+#[test]
+fn java_unicode_keystores_open_through_the_password_prompt() {
+    let directory = TestDirectory::new();
+    for (name, data, password, alias) in [
+        (
+            "unicode-password.jks",
+            UNICODE_PASSWORD_JKS,
+            "pässwörd-😀",
+            "root-cert",
+        ),
+        (
+            "unicode-alias.jks",
+            UNICODE_ALIAS_JKS,
+            "changeit",
+            "certificate-😀",
+        ),
+    ] {
+        let path = directory.path().join(name);
+        fs::write(&path, data).unwrap();
+        let mut app = App::default();
+        app.open_file(path.clone());
+        assert!(app.password_prompt.is_some());
+        assert!(app.entries.is_empty());
+        type_password(&mut app, password);
+        assert!(screen(&mut app, 100, 24).contains(&format!(
+            "Password: {}",
+            "*".repeat(password.chars().count())
+        )));
+        assert!(!screen(&mut app, 100, 24).contains(password));
+        press(&mut app, KeyCode::Enter);
+        assert!(app.password_prompt.is_none());
+        assert!(app.error.is_none());
+        assert_eq!(app.keystore_path, Some(path));
+        assert_eq!(app.entries[0].alias, alias);
+        assert!(screen(&mut app, 100, 24).contains(alias));
+    }
+}
+
+#[test]
+fn malformed_counts_report_an_error_and_preserve_the_loaded_keystore() {
+    let directory = TestDirectory::new();
+    let original = directory.path().join("original.jks");
+    fs::write(&original, empty_keystore()).unwrap();
+    let mut app = App::default();
+    app.open_file(original.clone());
+
+    let mut data = empty_keystore();
+    data[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
+    let malformed = directory.path().join("malformed.jks");
+    fs::write(&malformed, data).unwrap();
+    app.open_file(malformed);
+    assert!(app.password_prompt.is_none());
+    assert_eq!(app.keystore_path, Some(original));
+    assert!(red_text(&mut app).contains("not a valid JKS keystore"));
 }
 
 #[test]
