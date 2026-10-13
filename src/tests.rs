@@ -1,4 +1,8 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    io::{self, Read},
+    path::Path,
+};
 
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
@@ -396,7 +400,7 @@ fn entry_list_scrolls_to_entries_below_the_viewport() {
 }
 
 #[test]
-fn altgr_characters_are_typed_but_alt_and_ctrl_shortcuts_are_not() {
+fn altgr_is_typed_on_windows_and_other_modifier_chords_are_ignored() {
     let directory = TestDirectory::new();
     let path = directory.path().join("valid.jks");
     fs::write(&path, mixed_keystore()).unwrap();
@@ -414,20 +418,48 @@ fn altgr_characters_are_typed_but_alt_and_ctrl_shortcuts_are_not() {
     ] {
         app.handle_key(KeyEvent::new(KeyCode::Char(ch), modifiers));
     }
-    assert_eq!(app.password_prompt.as_ref().unwrap().password.0, "@€X");
+    // Only Windows reports AltGr as Ctrl+Alt; elsewhere it is a shortcut chord.
+    let expected = if cfg!(windows) { "@€X" } else { "X" };
+    assert_eq!(app.password_prompt.as_ref().unwrap().password.0, expected);
 }
 
 #[test]
-fn long_passwords_survive_buffer_growth() {
+fn long_passwords_survive_buffer_growth_and_backspace() {
     let mut password = Password::default();
-    let expected = "pässwörd-😀".repeat(20);
+    let mut expected = "pässwörd-😀".repeat(20);
     for ch in expected.chars() {
         password.push(ch);
     }
     assert_eq!(password.0, expected);
-    password.pop();
+    for _ in 0..3 {
+        password.pop();
+        expected.pop();
+        assert_eq!(password.0, expected);
+    }
     password.clear();
     assert!(password.0.is_empty());
+    password.pop();
+    assert!(password.0.is_empty());
+}
+
+struct CountingReader {
+    read: u64,
+}
+
+impl Read for CountingReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        buf.fill(0);
+        self.read += buf.len() as u64;
+        Ok(buf.len())
+    }
+}
+
+#[test]
+fn unbounded_input_is_rejected_after_reading_just_past_the_limit() {
+    let mut reader = CountingReader { read: 0 };
+    let error = read_bounded(&mut reader, u64::MAX, 1000).unwrap_err();
+    assert!(error.to_string().contains("keystore limit"));
+    assert_eq!(reader.read, 1001);
 }
 
 #[test]
