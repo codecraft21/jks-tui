@@ -10,3 +10,4 @@ repository = "https://github.com/codecraft21/jks-tui"
 # Optional PKCS12 support currently resolves to an incompatible p12-keystore API.
 jks = { version = "0.3.3", default-features = false, features = ["rand"] }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
+zeroize = "1"
