@@ -19,3 +19,18 @@ rmdir "$fixture_dir"
 ```
 
 Tests read the committed fixture; Java is not required to run them.
+
+`unicode-password.jks` and `unicode-alias.jks` are copies of the same trusted
+certificate fixture. The first uses the synthetic test password `pässwörd-😀` to
+exercise Java's UTF-16 password digest encoding. The second keeps `changeit` and
+uses the alias `certificate-😀` to exercise Java's modified UTF-8 string encoding.
+Neither contains private keys. Recreate them from this directory with:
+
+```sh
+cp trusted-cert.jks unicode-password.jks
+keytool -storepasswd -keystore unicode-password.jks -storetype JKS \
+  -storepass changeit -new 'pässwörd-😀'
+cp trusted-cert.jks unicode-alias.jks
+keytool -changealias -keystore unicode-alias.jks -storetype JKS \
+  -storepass changeit -alias root-cert -destalias 'certificate-😀'
+```
