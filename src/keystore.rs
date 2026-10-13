@@ -1,10 +1,11 @@
-use std::{collections::BTreeMap, io};
+use std::io;
 
 use jks::{
     KeyStoreError,
     common::{MAGIC, PRIVATE_KEY_TAG, TRUSTED_CERT_TAG, VERSION_01, VERSION_02, WHITENER_MESSAGE},
     decoder::Decoder,
 };
+use zeroize::Zeroize;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct KeystoreEntry {
@@ -12,13 +13,25 @@ pub struct KeystoreEntry {
     pub kind: &'static str,
 }
 
-pub fn load_entries(data: &[u8], password: &str) -> jks::Result<Vec<KeystoreEntry>> {
-    let body_len = data.len().checked_sub(20).ok_or_else(truncated)?;
-    let (body, mut digest) = data.split_at(body_len);
-    let mut reader = Reader { remaining: body };
-    if reader.u32()? != MAGIC {
+/// A structurally valid keystore whose integrity digest has not been checked.
+/// Parse once, then call `verify` for each password attempt.
+pub struct Keystore {
+    data: Vec<u8>,
+    body_len: usize,
+    entries: Vec<KeystoreEntry>,
+}
+
+const DIGEST_LEN: usize = 20;
+
+pub fn parse(data: Vec<u8>) -> jks::Result<Keystore> {
+    // Check the magic first so short or empty non-JKS files are reported as
+    // such rather than as truncated keystores.
+    if data.get(..4) != Some(&MAGIC.to_be_bytes()[..]) {
         return Err(KeyStoreError::InvalidMagic);
     }
+    let mut reader = Reader {
+        remaining: &data[4..],
+    };
     let version = reader.u32()?;
     if !matches!(version, VERSION_01 | VERSION_02) {
         return Err(KeyStoreError::UnknownVersion(version));
@@ -27,14 +40,20 @@ pub fn load_entries(data: &[u8], password: &str) -> jks::Result<Vec<KeystoreEntr
     // Even the smallest v1 entry needs a tag, alias length, timestamp and
     // certificate length. Never reserve memory from an untrusted count.
     let count = reader.count(18)?;
-    let mut entries = BTreeMap::new();
+    let mut entries = Vec::new();
     for _ in 0..count {
         let tag = reader.u32()?;
         let alias = reader.string()?;
         reader.take(8)?; // Creation timestamp; listing does not need it.
         let kind = match tag {
             PRIVATE_KEY_TAG => {
-                reader.payload()?; // Encrypted key bytes remain opaque.
+                // Encrypted key bytes remain opaque, but a real protected key
+                // is never empty. Java allows a key entry without a chain.
+                if reader.payload()?.is_empty() {
+                    return Err(KeyStoreError::Other(
+                        "private key entry contains no key data".into(),
+                    ));
+                }
                 let cert_count = reader.count(if version == VERSION_01 { 4 } else { 6 })?;
                 for _ in 0..cert_count {
                     reader.certificate(version)?;
@@ -47,28 +66,41 @@ pub fn load_entries(data: &[u8], password: &str) -> jks::Result<Vec<KeystoreEntr
             }
             _ => return Err(KeyStoreError::UnknownEntryTag(tag)),
         };
-        entries.insert(alias, kind);
+        entries.push(KeystoreEntry { alias, kind });
     }
-    if !reader.remaining.is_empty() {
-        return Err(KeyStoreError::Other("trailing data after keystore".into()));
+    let body_len = data.len() - reader.remaining.len();
+    // Like Java's JavaKeyStore, ignore anything after the digest.
+    reader.take(DIGEST_LEN)?;
+
+    // Keep duplicate aliases visible instead of letting one entry hide another.
+    entries.sort_by(|a, b| a.alias.cmp(&b.alias));
+    Ok(Keystore {
+        data,
+        body_len,
+        entries,
+    })
+}
+
+impl Keystore {
+    pub fn verify(&self, password: &str) -> jks::Result<()> {
+        let (body, rest) = self.data.split_at(self.body_len);
+        let mut digest = &rest[..DIGEST_LEN];
+        // Use only the crate's fixed-size digest verifier, not its allocating
+        // entry decoder. Java hashes password UTF-16 code units in big-endian order.
+        let mut verifier = Decoder::new(&mut digest);
+        for unit in password.encode_utf16() {
+            let mut bytes = unit.to_be_bytes();
+            verifier.update_digest(&bytes);
+            bytes.zeroize();
+        }
+        verifier.update_digest(WHITENER_MESSAGE);
+        verifier.update_digest(body);
+        verifier.verify_digest()
     }
 
-    // Use only the crate's fixed-size digest verifier, not its allocating
-    // entry decoder. Java hashes password UTF-16 code units in big-endian order.
-    let mut verifier = Decoder::new(&mut digest);
-    for unit in password.encode_utf16() {
-        let mut bytes = unit.to_be_bytes();
-        verifier.update_digest(&bytes);
-        jks::zeroing(&mut bytes);
+    pub fn into_entries(self) -> Vec<KeystoreEntry> {
+        self.entries
     }
-    verifier.update_digest(WHITENER_MESSAGE);
-    verifier.update_digest(body);
-    verifier.verify_digest()?;
-
-    Ok(entries
-        .into_iter()
-        .map(|(alias, kind)| KeystoreEntry { alias, kind })
-        .collect())
 }
 
 fn truncated() -> KeyStoreError {
@@ -101,26 +133,33 @@ impl<'a> Reader<'a> {
         Ok(count)
     }
 
-    fn payload(&mut self) -> jks::Result<()> {
+    fn payload(&mut self) -> jks::Result<&'a [u8]> {
         let len = self.u32()? as usize;
-        self.take(len)?;
-        Ok(())
+        self.take(len)
+    }
+
+    fn string_bytes(&mut self) -> jks::Result<&'a [u8]> {
+        let len = u16::from_be_bytes(self.take(2)?.try_into().unwrap()) as usize;
+        self.take(len)
     }
 
     fn certificate(&mut self, version: u32) -> jks::Result<()> {
         if version == VERSION_02 {
-            self.string()?;
+            self.string_bytes()?; // Certificate type; listing does not need it.
         }
-        self.payload()
+        // Java fails to load a keystore whose certificate encoding is empty.
+        if self.payload()?.is_empty() {
+            return Err(KeyStoreError::Other("empty certificate in JKS data".into()));
+        }
+        Ok(())
     }
 
     fn string(&mut self) -> jks::Result<String> {
-        let len = u16::from_be_bytes(self.take(2)?.try_into().unwrap()) as usize;
-        let mut bytes = self.take(len)?;
+        let mut bytes = self.string_bytes()?;
         // Java's DataInput.readUTF encodes UTF-16 units: NUL uses C0 80 and
         // supplementary characters use two three-byte surrogate sequences.
         let invalid = || KeyStoreError::Other("invalid modified UTF-8 in JKS string".into());
-        let mut units = Vec::new();
+        let mut units = Vec::with_capacity(bytes.len());
         while let Some((&first, rest)) = bytes.split_first() {
             bytes = rest;
             let unit = match first {
@@ -144,8 +183,16 @@ impl<'a> Reader<'a> {
             };
             units.push(unit);
         }
-        String::from_utf16(&units).map_err(|_| invalid())
+        // Java strings may hold unpaired surrogates; keep such aliases listable.
+        Ok(String::from_utf16_lossy(&units))
     }
+}
+
+#[cfg(test)]
+pub fn load_entries(data: &[u8], password: &str) -> jks::Result<Vec<KeystoreEntry>> {
+    let keystore = parse(data.to_vec())?;
+    keystore.verify(password)?;
+    Ok(keystore.into_entries())
 }
 
 #[cfg(test)]
@@ -154,7 +201,93 @@ mod tests {
     use crate::test_support::{
         KEYTOOL_JKS, UNICODE_ALIAS_JKS, UNICODE_PASSWORD_JKS, empty_keystore, mixed_keystore,
     };
-    use jks::{KeyStore, KeyStoreOptions};
+    use jks::{KeyStore, KeyStoreOptions, encoder::Encoder};
+
+    /// Writes a keystore field by field, recording where each length or count
+    /// lives so tests can corrupt them without re-implementing the parser.
+    #[derive(Default)]
+    struct Builder {
+        body: Vec<u8>,
+        u32_fields: Vec<usize>,
+        u16_fields: Vec<usize>,
+    }
+
+    impl Builder {
+        fn new(version: u32, count: u32) -> Self {
+            let mut builder = Self::default();
+            builder.u32(MAGIC);
+            builder.u32(version);
+            builder.u32_field(count);
+            builder
+        }
+
+        fn u32(&mut self, value: u32) {
+            self.body.extend_from_slice(&value.to_be_bytes());
+        }
+
+        fn u32_field(&mut self, value: u32) {
+            self.u32_fields.push(self.body.len());
+            self.u32(value);
+        }
+
+        fn raw_string(&mut self, bytes: &[u8]) {
+            self.u16_fields.push(self.body.len());
+            self.body
+                .extend_from_slice(&u16::try_from(bytes.len()).unwrap().to_be_bytes());
+            self.body.extend_from_slice(bytes);
+        }
+
+        fn payload(&mut self, bytes: &[u8]) {
+            self.u32_field(bytes.len().try_into().unwrap());
+            self.body.extend_from_slice(bytes);
+        }
+
+        fn certificate(&mut self, version: u32) {
+            if version == VERSION_02 {
+                self.raw_string(b"X.509");
+            }
+            self.payload(b"opaque synthetic certificate");
+        }
+
+        fn entry(&mut self, tag: u32, alias: &[u8], version: u32, certificates: u32) {
+            self.u32(tag);
+            self.raw_string(alias);
+            self.body.extend_from_slice(&0_u64.to_be_bytes());
+            if tag == PRIVATE_KEY_TAG {
+                self.payload(b"synthetic test payload, not a private key");
+                self.u32_field(certificates);
+            }
+            for _ in 0..certificates {
+                self.certificate(version);
+            }
+        }
+
+        fn finish(&self, password: &str) -> Vec<u8> {
+            let mut data = Vec::new();
+            let mut encoder = Encoder::new(&mut data);
+            for unit in password.encode_utf16() {
+                encoder.update_digest(&unit.to_be_bytes());
+            }
+            encoder.update_digest(WHITENER_MESSAGE);
+            encoder.write_bytes(&self.body).unwrap();
+            encoder.write_digest().unwrap();
+            data
+        }
+    }
+
+    fn key(alias: &str) -> KeystoreEntry {
+        KeystoreEntry {
+            alias: alias.into(),
+            kind: "Private key",
+        }
+    }
+
+    fn cert(alias: &str) -> KeystoreEntry {
+        KeystoreEntry {
+            alias: alias.into(),
+            kind: "Trusted certificate",
+        }
+    }
 
     #[test]
     fn verifies_java_passwords_with_accented_and_supplementary_characters() {
@@ -171,14 +304,73 @@ mod tests {
     }
 
     #[test]
+    fn a_parsed_keystore_can_be_verified_repeatedly() {
+        let keystore = parse(KEYTOOL_JKS.to_vec()).unwrap();
+        for _ in 0..2 {
+            assert!(matches!(
+                keystore.verify("wrong"),
+                Err(KeyStoreError::InvalidDigest)
+            ));
+        }
+        keystore.verify("changeit").unwrap();
+        assert_eq!(keystore.into_entries(), [cert("root-cert")]);
+    }
+
+    #[test]
     fn reads_java_aliases_with_supplementary_characters() {
         assert_eq!(
             load_entries(UNICODE_ALIAS_JKS, "changeit").unwrap(),
-            [KeystoreEntry {
-                alias: "certificate-😀".into(),
-                kind: "Trusted certificate",
-            }]
+            [cert("certificate-😀")]
         );
+    }
+
+    #[test]
+    fn lists_aliases_with_unpaired_surrogates_that_java_accepts() {
+        let mut builder = Builder::new(VERSION_02, 1);
+        builder.entry(TRUSTED_CERT_TAG, b"a\xed\xa0\xbd", VERSION_02, 1);
+        assert_eq!(
+            load_entries(&builder.finish(""), "").unwrap(),
+            [cert("a\u{fffd}")]
+        );
+    }
+
+    #[test]
+    fn duplicate_aliases_do_not_hide_entries() {
+        let mut builder = Builder::new(VERSION_02, 3);
+        builder.entry(PRIVATE_KEY_TAG, b"a", VERSION_02, 1);
+        builder.entry(TRUSTED_CERT_TAG, b"b", VERSION_02, 1);
+        builder.entry(TRUSTED_CERT_TAG, b"a", VERSION_02, 1);
+        assert_eq!(
+            load_entries(&builder.finish(""), "").unwrap(),
+            [key("a"), cert("a"), cert("b")]
+        );
+    }
+
+    #[test]
+    fn rejects_empty_key_material_and_certificates() {
+        let mut data = Builder::new(VERSION_02, 1);
+        data.u32(PRIVATE_KEY_TAG);
+        data.raw_string(b"key");
+        data.body.extend_from_slice(&0_u64.to_be_bytes());
+        data.payload(b"");
+        data.u32_field(0);
+        let error = parse(data.finish("")).err().unwrap();
+        assert!(error.to_string().contains("no key data"));
+
+        let mut data = Builder::new(VERSION_01, 1);
+        data.u32(TRUSTED_CERT_TAG);
+        data.raw_string(b"cert");
+        data.body.extend_from_slice(&0_u64.to_be_bytes());
+        data.payload(b"");
+        let error = parse(data.finish("")).err().unwrap();
+        assert!(error.to_string().contains("empty certificate"));
+    }
+
+    #[test]
+    fn lists_private_keys_without_a_certificate_chain() {
+        let mut builder = Builder::new(VERSION_02, 1);
+        builder.entry(PRIVATE_KEY_TAG, b"key", VERSION_02, 0);
+        assert_eq!(load_entries(&builder.finish(""), "").unwrap(), [key("key")]);
     }
 
     #[test]
@@ -186,62 +378,37 @@ mod tests {
         let mixed = mixed_keystore();
         for data in [KEYTOOL_JKS, UNICODE_ALIAS_JKS, mixed.as_slice()] {
             for end in 0..data.len() {
-                let error = load_entries(&data[..end], "").unwrap_err();
-                assert!(!matches!(error, KeyStoreError::InvalidDigest));
+                assert!(parse(data[..end].to_vec()).is_err());
             }
         }
     }
 
     #[test]
     fn rejects_unbounded_lengths_and_counts_without_allocating_payloads() {
-        let mut data = mixed_keystore();
-        // Locate the serialized fields in a valid store, then overwrite each
-        // length/count with its maximum value. Include the original crashing
-        // private-key chain count and lengths in trusted and chain certificates.
-        let body_len = data.len() - 20;
-        let mut reader = Reader {
-            remaining: &data[..body_len],
-        };
-        reader.take(8).unwrap();
-        let mut u32_offsets = vec![8]; // Entry count.
-        let mut u16_offsets = Vec::new();
-        let count = reader.u32().unwrap();
-        for _ in 0..count {
-            let tag = reader.u32().unwrap();
-            u16_offsets.push(body_len - reader.remaining.len());
-            reader.string().unwrap();
-            reader.take(8).unwrap();
-            let cert_count = if tag == PRIVATE_KEY_TAG {
-                u32_offsets.push(body_len - reader.remaining.len());
-                reader.payload().unwrap();
-                u32_offsets.push(body_len - reader.remaining.len());
-                reader.u32().unwrap()
-            } else {
-                1
-            };
-            for _ in 0..cert_count {
-                u16_offsets.push(body_len - reader.remaining.len());
-                reader.string().unwrap();
-                u32_offsets.push(body_len - reader.remaining.len());
-                reader.payload().unwrap();
-            }
-        }
-        for (offset, replacement) in u32_offsets
-            .into_iter()
-            .map(|offset| (offset, u32::MAX.to_be_bytes().to_vec()))
+        let mut builder = Builder::new(VERSION_02, 2);
+        builder.entry(PRIVATE_KEY_TAG, b"key", VERSION_02, 2);
+        builder.entry(TRUSTED_CERT_TAG, b"cert", VERSION_02, 1);
+        let mut data = builder.finish("changeit");
+        assert_eq!(load_entries(&data, "changeit").unwrap().len(), 2);
+        // Every length and count in both entry types, including the original
+        // crashing private-key chain count, is overwritten with its maximum.
+        let fields = builder
+            .u32_fields
+            .iter()
+            .map(|&offset| (offset, &[0xff; 4][..]))
             .chain(
-                u16_offsets
-                    .into_iter()
-                    .map(|offset| (offset, u16::MAX.to_be_bytes().to_vec())),
-            )
-        {
-            let original = data[offset..offset + replacement.len()].to_vec();
-            data[offset..offset + replacement.len()].copy_from_slice(&replacement);
-            for password in ["", "changeit"] {
-                let error = load_entries(&data, password).unwrap_err();
-                assert!(!matches!(error, KeyStoreError::InvalidDigest));
-            }
-            data[offset..offset + original.len()].copy_from_slice(&original);
+                builder
+                    .u16_fields
+                    .iter()
+                    .map(|&offset| (offset, &[0xff; 2][..])),
+            );
+        assert_eq!(fields.clone().count(), 11);
+        for (offset, replacement) in fields {
+            let range = offset..offset + replacement.len();
+            let original = data[range.clone()].to_vec();
+            data[range.clone()].copy_from_slice(replacement);
+            assert!(parse(data.clone()).is_err(), "field at {offset}");
+            data[range].copy_from_slice(&original);
         }
     }
 
@@ -257,7 +424,6 @@ mod tests {
             &b"\x00\x01\xc0"[..],             // Missing continuation.
             &b"\x00\x02\xc0A"[..],            // Invalid continuation.
             &b"\x00\x02\xe0\x80"[..],         // Truncated three-byte sequence.
-            &b"\x00\x03\xed\xa0\xbd"[..],     // Unpaired surrogate.
             &b"\x00\x04\xf0\x9f\x98\x80"[..], // Standard UTF-8 is not modified UTF-8.
         ] {
             assert!(Reader { remaining: bytes }.string().is_err());
@@ -266,36 +432,12 @@ mod tests {
 
     #[test]
     fn supports_v1_entries_without_certificate_type_fields() {
-        let mut data = Vec::new();
-        let mut encoder = jks::encoder::Encoder::new(&mut data);
-        encoder.update_digest(WHITENER_MESSAGE); // Empty test password.
-        encoder.write_u32(MAGIC).unwrap();
-        encoder.write_u32(VERSION_01).unwrap();
-        encoder.write_u32(2).unwrap();
-        for (tag, alias) in [(PRIVATE_KEY_TAG, "key"), (TRUSTED_CERT_TAG, "cert")] {
-            encoder.write_u32(tag).unwrap();
-            encoder.write_string(alias).unwrap();
-            encoder.write_u64(0).unwrap();
-            if tag == PRIVATE_KEY_TAG {
-                encoder.write_u32(0).unwrap(); // No actual key material.
-                encoder.write_u32(1).unwrap(); // One certificate in the chain.
-            }
-            encoder.write_u32(1).unwrap();
-            encoder.write_bytes(&[0]).unwrap(); // Opaque synthetic certificate.
-        }
-        encoder.write_digest().unwrap();
+        let mut builder = Builder::new(VERSION_01, 2);
+        builder.entry(PRIVATE_KEY_TAG, b"key", VERSION_01, 1);
+        builder.entry(TRUSTED_CERT_TAG, b"cert", VERSION_01, 1);
         assert_eq!(
-            load_entries(&data, "").unwrap(),
-            [
-                KeystoreEntry {
-                    alias: "cert".into(),
-                    kind: "Trusted certificate"
-                },
-                KeystoreEntry {
-                    alias: "key".into(),
-                    kind: "Private key"
-                },
-            ]
+            load_entries(&builder.finish(""), "").unwrap(),
+            [cert("cert"), key("key")]
         );
     }
 
@@ -303,10 +445,7 @@ mod tests {
     fn reads_a_java_generated_keystore() {
         assert_eq!(
             load_entries(KEYTOOL_JKS, "changeit").unwrap(),
-            [KeystoreEntry {
-                alias: "root-cert".into(),
-                kind: "Trusted certificate",
-            }]
+            [cert("root-cert")]
         );
     }
 
@@ -314,31 +453,30 @@ mod tests {
     fn lists_both_entry_types_in_alias_order_without_the_key_password() {
         assert_eq!(
             load_entries(&mixed_keystore(), "changeit").unwrap(),
-            [
-                KeystoreEntry {
-                    alias: "root-cert".into(),
-                    kind: "Trusted certificate",
-                },
-                KeystoreEntry {
-                    alias: "server-key".into(),
-                    kind: "Private key",
-                },
-            ]
+            [cert("root-cert"), key("server-key")]
         );
     }
 
     #[test]
-    fn rejects_non_jks_and_truncated_files() {
+    fn reports_short_and_empty_non_jks_files_as_invalid_magic() {
         for data in [
+            &b""[..],
+            &b"PK"[..],
             &b"not a keystore"[..],
             &b"\x30\x82PKCS12"[..],
-            &KEYTOOL_JKS[..0],
-            &KEYTOOL_JKS[..4],
-            &KEYTOOL_JKS[..12],
-            &KEYTOOL_JKS[..KEYTOOL_JKS.len() - 1],
         ] {
-            let error = load_entries(data, "changeit").unwrap_err();
-            assert!(!matches!(error, KeyStoreError::InvalidDigest));
+            assert!(matches!(
+                parse(data.to_vec()),
+                Err(KeyStoreError::InvalidMagic)
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_truncated_files() {
+        for end in [4, 12, KEYTOOL_JKS.len() - 1] {
+            let error = parse(KEYTOOL_JKS[..end].to_vec()).err().unwrap();
+            assert!(error.to_string().contains("truncated"));
         }
     }
 
@@ -360,20 +498,21 @@ mod tests {
     fn rejects_unsupported_versions_even_without_entries() {
         let mut data = empty_keystore();
         data[4..8].copy_from_slice(&3_u32.to_be_bytes());
-        assert!(matches!(
-            load_entries(&data, ""),
-            Err(KeyStoreError::UnknownVersion(3))
-        ));
+        assert!(matches!(parse(data), Err(KeyStoreError::UnknownVersion(3))));
     }
 
     #[test]
-    fn rejects_trailing_data_before_requesting_a_password() {
+    fn ignores_trailing_data_after_the_digest_like_java() {
         let mut data = KEYTOOL_JKS.to_vec();
-        data.push(0);
-        for password in ["", "changeit"] {
-            let error = load_entries(&data, password).unwrap_err();
-            assert!(error.to_string().contains("trailing data"));
-        }
+        data.extend_from_slice(b"\0trailing");
+        assert_eq!(
+            load_entries(&data, "changeit").unwrap(),
+            [cert("root-cert")]
+        );
+        assert!(matches!(
+            load_entries(&data, ""),
+            Err(KeyStoreError::InvalidDigest)
+        ));
     }
 
     #[test]

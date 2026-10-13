@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{fs, path::Path};
 
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
@@ -393,4 +393,50 @@ fn entry_list_scrolls_to_entries_below_the_viewport() {
         screen(&mut app, 100, 20);
     }
     assert!(screen(&mut app, 100, 20).contains("entry-39"));
+}
+
+#[test]
+fn altgr_characters_are_typed_but_alt_and_ctrl_shortcuts_are_not() {
+    let directory = TestDirectory::new();
+    let path = directory.path().join("valid.jks");
+    fs::write(&path, mixed_keystore()).unwrap();
+    let mut app = App::default();
+    app.open_file(path);
+    for (ch, modifiers) in [
+        ('a', KeyModifiers::ALT),
+        ('b', KeyModifiers::CONTROL),
+        ('@', KeyModifiers::CONTROL | KeyModifiers::ALT),
+        (
+            '€',
+            KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT,
+        ),
+        ('X', KeyModifiers::SHIFT),
+    ] {
+        app.handle_key(KeyEvent::new(KeyCode::Char(ch), modifiers));
+    }
+    assert_eq!(app.password_prompt.as_ref().unwrap().password.0, "@€X");
+}
+
+#[test]
+fn long_passwords_survive_buffer_growth() {
+    let mut password = Password::default();
+    let expected = "pässwörd-😀".repeat(20);
+    for ch in expected.chars() {
+        password.push(ch);
+    }
+    assert_eq!(password.0, expected);
+    password.pop();
+    password.clear();
+    assert!(password.0.is_empty());
+}
+
+#[test]
+fn oversized_files_are_rejected_without_reading_them_fully() {
+    let directory = TestDirectory::new();
+    let path = directory.path().join("large.jks");
+    fs::write(&path, mixed_keystore()).unwrap();
+    let size = fs::metadata(&path).unwrap().len();
+    assert!(read_limited(&path, size).is_ok());
+    let error = read_limited(&path, size - 1).unwrap_err();
+    assert!(error.to_string().contains("keystore limit"));
 }
