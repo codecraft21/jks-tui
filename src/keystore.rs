@@ -147,11 +147,6 @@ impl<'a> Reader<'a> {
         self.take(len)
     }
 
-    fn string_bytes(&mut self) -> jks::Result<&'a [u8]> {
-        let len = u16::from_be_bytes(self.take(2)?.try_into().unwrap()) as usize;
-        self.take(len)
-    }
-
     fn certificate(&mut self, version: u32) -> jks::Result<()> {
         // Java resolves the type with CertificateFactory (case-insensitively),
         // and standard providers only support X.509. Version 1 implies X.509.
@@ -168,7 +163,8 @@ impl<'a> Reader<'a> {
     }
 
     fn string(&mut self) -> jks::Result<String> {
-        let mut bytes = self.string_bytes()?;
+        let len = u16::from_be_bytes(self.take(2)?.try_into().unwrap()) as usize;
+        let mut bytes = self.take(len)?;
         // Java's DataInput.readUTF encodes UTF-16 units: NUL uses C0 80 and
         // supplementary characters use two three-byte surrogate sequences.
         let invalid = || KeyStoreError::Other("invalid modified UTF-8 in JKS string".into());
@@ -263,15 +259,20 @@ mod tests {
 
         fn certificate(&mut self, version: u32) {
             if version == VERSION_02 {
-                self.raw_string(b"X.509");
+                self.raw_string(CERTIFICATE_TYPE.as_bytes());
             }
             self.payload(b"opaque synthetic certificate");
         }
 
-        fn entry(&mut self, tag: u32, alias: &[u8], version: u32, certificates: u32) {
+        /// Writes the tag, alias and creation timestamp every entry starts with.
+        fn entry_header(&mut self, tag: u32, alias: &[u8]) {
             self.u32(tag);
             self.raw_string(alias);
             self.body.extend_from_slice(&0_u64.to_be_bytes());
+        }
+
+        fn entry(&mut self, tag: u32, alias: &[u8], version: u32, certificates: u32) {
+            self.entry_header(tag, alias);
             if tag == PRIVATE_KEY_TAG {
                 self.payload(b"synthetic test payload, not a private key");
                 self.u32_field(certificates);
@@ -365,9 +366,7 @@ mod tests {
     #[test]
     fn accepts_empty_key_material_like_java() {
         let mut data = Builder::new(VERSION_02, 1);
-        data.u32(PRIVATE_KEY_TAG);
-        data.raw_string(b"key");
-        data.body.extend_from_slice(&0_u64.to_be_bytes());
+        data.entry_header(PRIVATE_KEY_TAG, b"key");
         data.payload(b"");
         data.u32_field(1);
         data.certificate(VERSION_02);
@@ -404,9 +403,7 @@ mod tests {
             ),
         ] {
             let mut data = Builder::new(version, 1);
-            data.u32(TRUSTED_CERT_TAG);
-            data.raw_string(b"cert");
-            data.body.extend_from_slice(&0_u64.to_be_bytes());
+            data.entry_header(TRUSTED_CERT_TAG, b"cert");
             if let Some(cert_type) = cert_type {
                 data.raw_string(cert_type);
             }

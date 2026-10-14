@@ -420,7 +420,7 @@ fn altgr_is_typed_on_windows_and_other_modifier_chords_are_ignored() {
     }
     // Only Windows reports AltGr as Ctrl+Alt; elsewhere it is a shortcut chord.
     let expected = if cfg!(windows) { "@€X" } else { "X" };
-    assert_eq!(app.password_prompt.as_ref().unwrap().password.0, expected);
+    assert_eq!(*app.password_prompt.as_ref().unwrap().password.0, expected);
 }
 
 #[test]
@@ -430,11 +430,11 @@ fn long_passwords_survive_buffer_growth_and_backspace() {
     for ch in expected.chars() {
         password.push(ch);
     }
-    assert_eq!(password.0, expected);
+    assert_eq!(*password.0, expected);
     for _ in 0..3 {
         password.pop();
         expected.pop();
-        assert_eq!(password.0, expected);
+        assert_eq!(*password.0, expected);
     }
     password.clear();
     assert!(password.0.is_empty());
