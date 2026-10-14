@@ -12,7 +12,7 @@ pub const UNICODE_PASSWORD_JKS: &[u8] = include_bytes!("../tests/fixtures/unicod
 pub const UNICODE_ALIAS_JKS: &[u8] = include_bytes!("../tests/fixtures/unicode-alias.jks");
 
 pub struct TestDirectory {
-    pub path: PathBuf,
+    path: PathBuf,
 }
 
 impl TestDirectory {
