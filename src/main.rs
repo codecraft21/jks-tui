@@ -22,17 +22,17 @@ use ratatui::{
 
 use file_picker::FilePicker;
 use keystore::{Keystore, KeystoreEntry};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Real keystores are far smaller; refuse to read arbitrarily large files.
 const MAX_KEYSTORE_SIZE: u64 = 64 * 1024 * 1024;
 
 /// Grows its buffer manually so no reallocation leaves a stale copy behind.
-struct Password(String);
+struct Password(Zeroizing<String>);
 
 impl Default for Password {
     fn default() -> Self {
-        Self(String::with_capacity(64))
+        Self(Zeroizing::new(String::with_capacity(64)))
     }
 }
 
@@ -41,8 +41,8 @@ impl Password {
         if self.0.len() + ch.len_utf8() > self.0.capacity() {
             let mut grown = String::with_capacity(self.0.capacity() * 2 + ch.len_utf8());
             grown.push_str(&self.0);
-            self.0.zeroize();
-            self.0 = grown;
+            // Dropping the old buffer wipes it.
+            self.0 = Zeroizing::new(grown);
         }
         self.0.push(ch);
     }
@@ -52,21 +52,15 @@ impl Password {
             return;
         };
         // Wipe the removed character's bytes before shortening the buffer.
-        let mut bytes = std::mem::take(&mut self.0).into_bytes();
+        let mut bytes = std::mem::take(&mut *self.0).into_bytes();
         bytes[index..].zeroize();
         bytes.truncate(index);
-        self.0 = String::from_utf8(bytes).expect("truncated at a char boundary");
+        *self.0 = String::from_utf8(bytes).expect("truncated at a char boundary");
     }
 
     fn clear(&mut self) {
         // Zeroes the whole allocation, including spare capacity.
         self.0.zeroize();
-    }
-}
-
-impl Drop for Password {
-    fn drop(&mut self) {
-        self.clear();
     }
 }
 
@@ -163,22 +157,12 @@ impl App {
 
     fn open_file(&mut self, path: PathBuf) {
         self.error = None;
-        let data = match read_limited(&path, MAX_KEYSTORE_SIZE) {
-            Ok(data) => data,
-            Err(error) => {
-                self.error = Some(format!("Cannot read {}: {error}", path.display()));
-                return;
-            }
-        };
         // Parse the entire structure once, before prompting. Empty-password
         // stores are verified immediately; others require their password.
-        let keystore = match keystore::parse(data) {
+        let keystore = match load(&path) {
             Ok(keystore) => keystore,
             Err(error) => {
-                self.error = Some(format!(
-                    "{} is not a valid JKS keystore: {error}",
-                    path.display()
-                ));
+                self.error = Some(error);
                 return;
             }
         };
@@ -199,7 +183,6 @@ impl App {
         self.entries_state =
             TableState::default().with_selected((!entries.is_empty()).then_some(0));
         self.entries = entries;
-        self.password_prompt = None;
         self.error = None;
     }
 
@@ -297,6 +280,13 @@ fn is_text_input(modifiers: KeyModifiers) -> bool {
     let control = modifiers.contains(KeyModifiers::CONTROL);
     let alt = modifiers.contains(KeyModifiers::ALT);
     (cfg!(windows) && control && alt) || (!control && !alt)
+}
+
+fn load(path: &Path) -> Result<Keystore, String> {
+    let data = read_limited(path, MAX_KEYSTORE_SIZE)
+        .map_err(|error| format!("Cannot read {}: {error}", path.display()))?;
+    keystore::parse(data)
+        .map_err(|error| format!("{} is not a valid JKS keystore: {error}", path.display()))
 }
 
 fn read_limited(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
