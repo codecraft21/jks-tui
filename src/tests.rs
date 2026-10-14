@@ -472,3 +472,14 @@ fn oversized_files_are_rejected_without_reading_them_fully() {
     let error = read_limited(&path, size - 1).unwrap_err();
     assert!(error.to_string().contains("keystore limit"));
 }
+
+#[test]
+fn ctrl_alt_c_does_not_quit() {
+    let mut app = App::default();
+    let altgr_c = KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL | KeyModifiers::ALT,
+    );
+    assert!(!app.handle_key(altgr_c));
+    assert!(app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+}
