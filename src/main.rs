@@ -12,7 +12,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use jks::KeyStoreError;
 use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
@@ -49,8 +48,14 @@ impl Password {
     }
 
     fn pop(&mut self) {
-        // Removed bytes stay in spare capacity until `clear` wipes it.
-        self.0.pop();
+        let Some((index, _)) = self.0.char_indices().next_back() else {
+            return;
+        };
+        // Wipe the removed character's bytes before shortening the buffer.
+        let mut bytes = std::mem::take(&mut self.0).into_bytes();
+        bytes[index..].zeroize();
+        bytes.truncate(index);
+        self.0 = String::from_utf8(bytes).expect("truncated at a char boundary");
     }
 
     fn clear(&mut self) {
@@ -88,7 +93,9 @@ impl App {
         }
 
         if (key.code == KeyCode::Char('q') && self.password_prompt.is_none())
-            || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+            || (key.code == KeyCode::Char('c')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT))
         {
             return true;
         }
@@ -125,31 +132,28 @@ impl App {
             return;
         };
         match key.code {
-            // Windows reports AltGr as Ctrl+Alt, so only Ctrl or Alt alone is
-            // treated as a shortcut rather than typed text.
-            KeyCode::Char(ch)
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    == key.modifiers.contains(KeyModifiers::ALT) =>
-            {
-                prompt.password.push(ch);
-            }
+            KeyCode::Char(ch) if is_text_input(key.modifiers) => prompt.password.push(ch),
             KeyCode::Backspace => prompt.password.pop(),
             KeyCode::Enter => {
-                let result = prompt.keystore.verify(&prompt.password.0);
-                prompt.password.clear();
+                let PasswordPrompt {
+                    path,
+                    keystore,
+                    mut password,
+                } = self.password_prompt.take().unwrap();
+                let result = keystore.verify(&password.0);
+                password.clear();
                 match result {
-                    Ok(()) => {
-                        let prompt = self.password_prompt.take().unwrap();
-                        self.show_entries(prompt.path, prompt.keystore.into_entries());
-                    }
-                    Err(KeyStoreError::InvalidDigest) => {
+                    Ok(entries) => self.show_entries(path, entries),
+                    Err(keystore) => {
+                        self.password_prompt = Some(PasswordPrompt {
+                            path,
+                            keystore,
+                            password,
+                        });
                         self.error = Some(
                             "Incorrect password or keystore integrity check failed. Try again or press Esc."
                                 .into(),
                         );
-                    }
-                    Err(error) => {
-                        self.error = Some(format!("Not a valid JKS keystore: {error}"));
                     }
                 }
             }
@@ -179,19 +183,13 @@ impl App {
             }
         };
         match keystore.verify("") {
-            Ok(()) => self.show_entries(path, keystore.into_entries()),
-            Err(KeyStoreError::InvalidDigest) => {
+            Ok(entries) => self.show_entries(path, entries),
+            Err(keystore) => {
                 self.password_prompt = Some(PasswordPrompt {
                     path,
                     keystore,
                     password: Password::default(),
                 });
-            }
-            Err(error) => {
-                self.error = Some(format!(
-                    "{} is not a valid JKS keystore: {error}",
-                    path.display()
-                ));
             }
         }
     }
@@ -293,15 +291,39 @@ impl App {
     }
 }
 
+/// Whether a character key with these modifiers is text rather than a
+/// shortcut. Windows reports AltGr as Ctrl+Alt; elsewhere Ctrl+Alt is a chord.
+fn is_text_input(modifiers: KeyModifiers) -> bool {
+    let control = modifiers.contains(KeyModifiers::CONTROL);
+    let alt = modifiers.contains(KeyModifiers::ALT);
+    (cfg!(windows) && control && alt) || (!control && !alt)
+}
+
 fn read_limited(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
-    let mut data = Vec::new();
-    File::open(path)?.take(limit + 1).read_to_end(&mut data)?;
+    let file = File::open(path)?;
+    let size_hint = file.metadata()?.len();
+    if size_hint > limit {
+        return Err(too_large(limit));
+    }
+    read_bounded(file, size_hint, limit)
+}
+
+/// Reads at most `limit + 1` bytes, so an oversized input is detected without
+/// reading all of it. `size_hint` pre-sizes the buffer to avoid regrowth.
+fn read_bounded(reader: impl Read, size_hint: u64, limit: u64) -> io::Result<Vec<u8>> {
+    let capacity = usize::try_from(size_hint.min(limit + 1)).unwrap_or(0);
+    let mut data = Vec::with_capacity(capacity);
+    reader.take(limit + 1).read_to_end(&mut data)?;
     if data.len() as u64 > limit {
-        return Err(io::Error::other(format!(
-            "file is larger than the {limit}-byte keystore limit"
-        )));
+        return Err(too_large(limit));
     }
     Ok(data)
+}
+
+fn too_large(limit: u64) -> io::Error {
+    io::Error::other(format!(
+        "file is larger than the {limit}-byte keystore limit"
+    ))
 }
 
 fn main() -> io::Result<()> {
