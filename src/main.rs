@@ -93,7 +93,9 @@ impl App {
         }
 
         if (key.code == KeyCode::Char('q') && self.password_prompt.is_none())
-            || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+            || (key.code == KeyCode::Char('c')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT))
         {
             return true;
         }
@@ -300,6 +302,9 @@ fn is_text_input(modifiers: KeyModifiers) -> bool {
 fn read_limited(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     let file = File::open(path)?;
     let size_hint = file.metadata()?.len();
+    if size_hint > limit {
+        return Err(too_large(limit));
+    }
     read_bounded(file, size_hint, limit)
 }
 
@@ -310,11 +315,15 @@ fn read_bounded(reader: impl Read, size_hint: u64, limit: u64) -> io::Result<Vec
     let mut data = Vec::with_capacity(capacity);
     reader.take(limit + 1).read_to_end(&mut data)?;
     if data.len() as u64 > limit {
-        return Err(io::Error::other(format!(
-            "file is larger than the {limit}-byte keystore limit"
-        )));
+        return Err(too_large(limit));
     }
     Ok(data)
+}
+
+fn too_large(limit: u64) -> io::Error {
+    io::Error::other(format!(
+        "file is larger than the {limit}-byte keystore limit"
+    ))
 }
 
 fn main() -> io::Result<()> {
