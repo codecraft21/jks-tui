@@ -10,6 +10,7 @@ use std::{
     fs::File,
     io::{self, Read},
     path::{Path, PathBuf},
+    process::ExitCode,
 };
 
 use ratatui::{
@@ -316,8 +317,25 @@ fn too_large(limit: u64) -> io::Error {
     ))
 }
 
-fn main() -> io::Result<()> {
-    ratatui::run(run)
+fn main() -> ExitCode {
+    let mut terminal = match ratatui::try_init() {
+        Ok(terminal) => terminal,
+        Err(err) => {
+            // Undo raw mode in case it was enabled before the failure.
+            let _ = ratatui::try_restore();
+            eprintln!("jks-tui must be run in an interactive terminal: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let result = run(&mut terminal);
+    ratatui::restore();
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("jks-tui: {err}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn run(terminal: &mut DefaultTerminal) -> io::Result<()> {
