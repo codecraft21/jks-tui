@@ -101,11 +101,12 @@ impl FilePicker {
 
     fn move_selection(&mut self, offset: isize) {
         if let Some(selected) = self.selection.selected() {
-            self.selection.select(Some(
-                selected
-                    .saturating_add_signed(offset)
-                    .min(self.entries.len().saturating_sub(1)),
-            ));
+            let next = if offset < 0 {
+                selected.checked_sub(1).unwrap_or(self.entries.len() - 1)
+            } else {
+                (selected + 1) % self.entries.len()
+            };
+            self.selection.select(Some(next));
         }
     }
 
@@ -201,5 +202,29 @@ impl FilePicker {
             .wrap(Wrap { trim: false }),
             help,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn navigation_with_no_entries_keeps_selection_empty() {
+        let mut picker = FilePicker {
+            directory: PathBuf::new(),
+            entries: Vec::new(),
+            selection: ListState::default(),
+            error: None,
+        };
+        for key in [
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Char('k'),
+            KeyCode::Char('j'),
+        ] {
+            assert_eq!(picker.handle_key(key), None);
+            assert_eq!(picker.selection.selected(), None);
+        }
     }
 }

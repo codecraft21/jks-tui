@@ -23,7 +23,7 @@ first.
 
 | Key | Action in the file browser |
 | --- | --- |
-| `Up` / `Down` or `k` / `j` | Move the selection |
+| `Up` / `Down` or `k` / `j` | Move the selection, wrapping at either end (including `../`) |
 | `Home` / `End` | Jump to the first / last entry |
 | `Enter` | Enter a directory or select a keystore |
 | `Right` | Enter the selected directory |
