@@ -131,6 +131,60 @@ fn browser_shows_directories_then_supported_keystore_files() {
 }
 
 #[test]
+fn browser_cycles_through_parent_directories_and_files_in_both_directions() {
+    let directory = TestDirectory::new();
+    fs::create_dir(directory.path().join("nested")).unwrap();
+    fs::write(directory.path().join("store.jks"), empty_keystore()).unwrap();
+
+    for (up, down) in [
+        (KeyCode::Up, KeyCode::Down),
+        (KeyCode::Char('k'), KeyCode::Char('j')),
+    ] {
+        let mut app = browsing(directory.path());
+        assert!(screen(&mut app, 100, 24).contains("> ../"));
+        for expected in ["store.jks", "nested/", "../"] {
+            assert!(!press(&mut app, up));
+            assert!(screen(&mut app, 100, 24).contains(&format!("> {expected}")));
+        }
+        for expected in ["nested/", "store.jks", "../"] {
+            assert!(!press(&mut app, down));
+            assert!(screen(&mut app, 100, 24).contains(&format!("> {expected}")));
+        }
+        assert!(app.keystore_path.is_none());
+        assert!(app.file_picker.is_some());
+    }
+}
+
+#[test]
+fn browser_wrapping_scrolls_between_ends_of_a_long_list() {
+    let directory = TestDirectory::new();
+    for index in 0..40 {
+        fs::write(directory.path().join(format!("store-{index:02}.jks")), "").unwrap();
+    }
+    let mut app = browsing(directory.path());
+    assert!(screen(&mut app, 100, 20).contains("> ../"));
+    press(&mut app, KeyCode::Up);
+    assert!(screen(&mut app, 100, 20).contains("> store-39.jks"));
+    press(&mut app, KeyCode::Down);
+    assert!(screen(&mut app, 100, 20).contains("> ../"));
+}
+
+#[test]
+fn browser_cycles_safely_with_only_the_parent_entry() {
+    let directory = TestDirectory::new();
+    let mut app = browsing(directory.path());
+    for key in [
+        KeyCode::Up,
+        KeyCode::Down,
+        KeyCode::Char('k'),
+        KeyCode::Char('j'),
+    ] {
+        assert!(!press(&mut app, key));
+        assert!(screen(&mut app, 100, 24).contains("> ../"));
+    }
+}
+
+#[test]
 fn pkcs12_renamed_as_jks_opens_after_password_verification() {
     let directory = TestDirectory::new();
     let path = directory.path().join("renamed.jks");
