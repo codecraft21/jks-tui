@@ -3,8 +3,8 @@
 - Read `README.md` for the current scope, run instructions, and development checks.
 - Keep changes focused on the small TUI; introduce modules as responsibilities grow.
 - Preserve terminal cleanup through `ratatui::run` and all documented quit shortcuts.
-- Keep dependency features minimal; review the `jks` compatibility note in
-  `Cargo.toml` before changing its features.
+- Keep dependencies and their features minimal. The JKS format is parsed in
+  `src/keystore.rs`; only SHA-1 hashing comes from a crate.
 - For keystore work, use generated test fixtures and keep passwords, private keys,
   and real keystores out of logs and commits.
 - After code or dependency changes, run the checks in the README's Development

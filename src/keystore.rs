@@ -1,11 +1,38 @@
-use std::io;
+use std::fmt;
 
-use jks::{
-    KeyStoreError,
-    common::{MAGIC, PRIVATE_KEY_TAG, TRUSTED_CERT_TAG, VERSION_01, VERSION_02, WHITENER_MESSAGE},
-    decoder::Decoder,
-};
+use sha1::{Digest, Sha1};
 use zeroize::Zeroize;
+
+pub(crate) const MAGIC: u32 = 0xfeed_feed;
+pub(crate) const VERSION_01: u32 = 1;
+pub(crate) const VERSION_02: u32 = 2;
+pub(crate) const PRIVATE_KEY_TAG: u32 = 1;
+pub(crate) const TRUSTED_CERT_TAG: u32 = 2;
+/// Java appends this to the password before hashing the keystore body.
+const WHITENER_MESSAGE: &[u8] = b"Mighty Aphrodite";
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Error {
+    InvalidMagic,
+    UnknownVersion(u32),
+    UnknownEntryTag(u32),
+    Truncated,
+    Invalid(&'static str),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidMagic => f.write_str("not a JKS file (bad magic number)"),
+            Self::UnknownVersion(version) => write!(f, "unsupported JKS version {version}"),
+            Self::UnknownEntryTag(tag) => write!(f, "unknown entry tag {tag}"),
+            Self::Truncated => f.write_str("truncated JKS data"),
+            Self::Invalid(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct KeystoreEntry {
@@ -22,22 +49,22 @@ pub struct Keystore {
     entries: Vec<KeystoreEntry>,
 }
 
-const DIGEST_LEN: usize = 20;
+pub(crate) const DIGEST_LEN: usize = 20;
 /// The only certificate type standard Java providers can load from a JKS file.
-const CERTIFICATE_TYPE: &str = "X.509";
+pub(crate) const CERTIFICATE_TYPE: &str = "X.509";
 
-pub fn parse(mut data: Vec<u8>) -> jks::Result<Keystore> {
+pub fn parse(mut data: Vec<u8>) -> Result<Keystore, Error> {
     // Check the magic first so short or empty non-JKS files are reported as
     // such rather than as truncated keystores.
     if data.get(..4) != Some(&MAGIC.to_be_bytes()[..]) {
-        return Err(KeyStoreError::InvalidMagic);
+        return Err(Error::InvalidMagic);
     }
     let mut reader = Reader {
         remaining: &data[4..],
     };
     let version = reader.u32()?;
     if !matches!(version, VERSION_01 | VERSION_02) {
-        return Err(KeyStoreError::UnknownVersion(version));
+        return Err(Error::UnknownVersion(version));
     }
 
     // Even the smallest v1 entry needs a tag, alias length, timestamp and
@@ -63,7 +90,7 @@ pub fn parse(mut data: Vec<u8>) -> jks::Result<Keystore> {
                 reader.certificate(version)?;
                 "Trusted certificate"
             }
-            _ => return Err(KeyStoreError::UnknownEntryTag(tag)),
+            _ => return Err(Error::UnknownEntryTag(tag)),
         };
         entries.push(KeystoreEntry { alias, kind });
     }
@@ -87,18 +114,21 @@ impl Keystore {
     /// Returns the entries if the password matches the integrity digest, or
     /// the keystore back for another attempt if it does not.
     pub fn verify(self, password: &str) -> Result<Vec<KeystoreEntry>, Self> {
-        let (body, mut digest) = self.data.split_at(self.body_len);
-        // Use only the crate's fixed-size digest verifier, not its allocating
-        // entry decoder. `parse` guarantees exactly DIGEST_LEN digest bytes, so
-        // the only possible failure is a mismatch.
-        let mut verifier = Decoder::new(&mut digest);
-        hash_password(password, |bytes| verifier.update_digest(bytes));
-        verifier.update_digest(body);
-        match verifier.verify_digest() {
-            Ok(()) => Ok(self.entries),
-            Err(_) => Err(self),
+        let (body, digest) = self.data.split_at(self.body_len);
+        if digest_of(password, body)[..] == *digest {
+            Ok(self.entries)
+        } else {
+            Err(self)
         }
     }
+}
+
+/// The integrity digest Java stores after the keystore body.
+pub(crate) fn digest_of(password: &str, body: &[u8]) -> [u8; DIGEST_LEN] {
+    let mut hasher = Sha1::new();
+    hash_password(password, |bytes| hasher.update(bytes));
+    hasher.update(body);
+    hasher.finalize().into()
 }
 
 /// Feeds the digest prefix Java uses: the password's UTF-16 code units in
@@ -112,62 +142,56 @@ fn hash_password(password: &str, mut update: impl FnMut(&[u8])) {
     update(WHITENER_MESSAGE);
 }
 
-fn truncated() -> KeyStoreError {
-    io::Error::new(io::ErrorKind::UnexpectedEof, "truncated JKS data").into()
-}
-
 struct Reader<'a> {
     remaining: &'a [u8],
 }
 
 impl<'a> Reader<'a> {
-    fn take(&mut self, len: usize) -> jks::Result<&'a [u8]> {
+    fn take(&mut self, len: usize) -> Result<&'a [u8], Error> {
         if len > self.remaining.len() {
-            return Err(truncated());
+            return Err(Error::Truncated);
         }
         let (bytes, remaining) = self.remaining.split_at(len);
         self.remaining = remaining;
         Ok(bytes)
     }
 
-    fn u32(&mut self) -> jks::Result<u32> {
+    fn u32(&mut self) -> Result<u32, Error> {
         Ok(u32::from_be_bytes(self.take(4)?.try_into().unwrap()))
     }
 
-    fn count(&mut self, minimum_size: usize) -> jks::Result<u32> {
+    fn count(&mut self, minimum_size: usize) -> Result<u32, Error> {
         let count = self.u32()?;
         if u64::from(count) > (self.remaining.len() / minimum_size) as u64 {
-            return Err(truncated());
+            return Err(Error::Truncated);
         }
         Ok(count)
     }
 
-    fn payload(&mut self) -> jks::Result<&'a [u8]> {
+    fn payload(&mut self) -> Result<&'a [u8], Error> {
         let len = self.u32()? as usize;
         self.take(len)
     }
 
-    fn certificate(&mut self, version: u32) -> jks::Result<()> {
+    fn certificate(&mut self, version: u32) -> Result<(), Error> {
         // Java resolves the type with CertificateFactory (case-insensitively),
         // and standard providers only support X.509. Version 1 implies X.509.
         if version == VERSION_02 && !self.string()?.eq_ignore_ascii_case(CERTIFICATE_TYPE) {
-            return Err(KeyStoreError::Other(
-                "unsupported certificate type in JKS data".into(),
-            ));
+            return Err(Error::Invalid("unsupported certificate type in JKS data"));
         }
         // Java fails to load a keystore whose certificate encoding is empty.
         if self.payload()?.is_empty() {
-            return Err(KeyStoreError::Other("empty certificate in JKS data".into()));
+            return Err(Error::Invalid("empty certificate in JKS data"));
         }
         Ok(())
     }
 
-    fn string(&mut self) -> jks::Result<String> {
+    fn string(&mut self) -> Result<String, Error> {
         let len = u16::from_be_bytes(self.take(2)?.try_into().unwrap()) as usize;
         let mut bytes = self.take(len)?;
         // Java's DataInput.readUTF encodes UTF-16 units: NUL uses C0 80 and
         // supplementary characters use two three-byte surrogate sequences.
-        let invalid = || KeyStoreError::Other("invalid modified UTF-8 in JKS string".into());
+        let invalid = || Error::Invalid("invalid modified UTF-8 in JKS string");
         let mut units = Vec::with_capacity(bytes.len());
         while let Some((&first, rest)) = bytes.split_first() {
             bytes = rest;
@@ -204,94 +228,19 @@ impl<'a> Reader<'a> {
 }
 
 #[cfg(test)]
-pub fn load_entries(data: &[u8], password: &str) -> jks::Result<Vec<KeystoreEntry>> {
-    parse(data.to_vec())?
-        .verify(password)
-        .map_err(|_| KeyStoreError::InvalidDigest)
+/// Parses valid test data and returns its entries, or `None` if the password
+/// does not match the digest.
+pub fn load_entries(data: &[u8], password: &str) -> Option<Vec<KeystoreEntry>> {
+    parse(data.to_vec()).unwrap().verify(password).ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::{
-        KEYTOOL_JKS, UNICODE_ALIAS_JKS, UNICODE_PASSWORD_JKS, empty_keystore, mixed_keystore,
+        Builder, KEYTOOL_JKS, UNICODE_ALIAS_JKS, UNICODE_PASSWORD_JKS, empty_keystore,
+        mixed_keystore,
     };
-    use jks::{KeyStore, KeyStoreOptions, encoder::Encoder};
-
-    /// Writes a keystore field by field, recording where each length or count
-    /// lives so tests can corrupt them without re-implementing the parser.
-    #[derive(Default)]
-    struct Builder {
-        body: Vec<u8>,
-        u32_fields: Vec<usize>,
-        u16_fields: Vec<usize>,
-    }
-
-    impl Builder {
-        fn new(version: u32, count: u32) -> Self {
-            let mut builder = Self::default();
-            builder.u32(MAGIC);
-            builder.u32(version);
-            builder.u32_field(count);
-            builder
-        }
-
-        fn u32(&mut self, value: u32) {
-            self.body.extend_from_slice(&value.to_be_bytes());
-        }
-
-        fn u32_field(&mut self, value: u32) {
-            self.u32_fields.push(self.body.len());
-            self.u32(value);
-        }
-
-        fn raw_string(&mut self, bytes: &[u8]) {
-            self.u16_fields.push(self.body.len());
-            self.body
-                .extend_from_slice(&u16::try_from(bytes.len()).unwrap().to_be_bytes());
-            self.body.extend_from_slice(bytes);
-        }
-
-        fn payload(&mut self, bytes: &[u8]) {
-            self.u32_field(bytes.len().try_into().unwrap());
-            self.body.extend_from_slice(bytes);
-        }
-
-        fn certificate(&mut self, version: u32) {
-            if version == VERSION_02 {
-                self.raw_string(CERTIFICATE_TYPE.as_bytes());
-            }
-            self.payload(b"opaque synthetic certificate");
-        }
-
-        /// Writes the tag, alias and creation timestamp every entry starts with.
-        fn entry_header(&mut self, tag: u32, alias: &[u8]) {
-            self.u32(tag);
-            self.raw_string(alias);
-            self.body.extend_from_slice(&0_u64.to_be_bytes());
-        }
-
-        fn entry(&mut self, tag: u32, alias: &[u8], version: u32, certificates: u32) {
-            self.entry_header(tag, alias);
-            if tag == PRIVATE_KEY_TAG {
-                self.payload(b"synthetic test payload, not a private key");
-                self.u32_field(certificates);
-            }
-            for _ in 0..certificates {
-                self.certificate(version);
-            }
-        }
-
-        fn finish(&self, password: &str) -> Vec<u8> {
-            let mut data = Vec::new();
-            let mut encoder = Encoder::new(&mut data);
-            hash_password(password, |bytes| encoder.update_digest(bytes));
-            encoder.write_bytes(&self.body).unwrap();
-            encoder.write_digest().unwrap();
-            data
-        }
-    }
-
     fn key(alias: &str) -> KeystoreEntry {
         KeystoreEntry {
             alias: alias.into(),
@@ -313,10 +262,7 @@ mod tests {
             load_entries(KEYTOOL_JKS, "changeit").unwrap()
         );
         for password in ["", "pässwörd", "pässwörd-😁"] {
-            assert!(matches!(
-                load_entries(UNICODE_PASSWORD_JKS, password),
-                Err(KeyStoreError::InvalidDigest)
-            ));
+            assert!(load_entries(UNICODE_PASSWORD_JKS, password).is_none());
         }
     }
 
@@ -521,10 +467,7 @@ mod tests {
             &b"not a keystore"[..],
             &b"\x30\x82PKCS12"[..],
         ] {
-            assert!(matches!(
-                parse(data.to_vec()),
-                Err(KeyStoreError::InvalidMagic)
-            ));
+            assert!(matches!(parse(data.to_vec()), Err(Error::InvalidMagic)));
         }
     }
 
@@ -538,23 +481,17 @@ mod tests {
 
     #[test]
     fn rejects_wrong_password_and_corrupt_digest_without_returning_entries() {
-        assert!(matches!(
-            load_entries(KEYTOOL_JKS, "wrong-password"),
-            Err(KeyStoreError::InvalidDigest)
-        ));
+        assert!(load_entries(KEYTOOL_JKS, "wrong-password").is_none());
         let mut data = KEYTOOL_JKS.to_vec();
         *data.last_mut().unwrap() ^= 1;
-        assert!(matches!(
-            load_entries(&data, "changeit"),
-            Err(KeyStoreError::InvalidDigest)
-        ));
+        assert!(load_entries(&data, "changeit").is_none());
     }
 
     #[test]
     fn rejects_unsupported_versions_even_without_entries() {
         let mut data = empty_keystore();
         data[4..8].copy_from_slice(&3_u32.to_be_bytes());
-        assert!(matches!(parse(data), Err(KeyStoreError::UnknownVersion(3))));
+        assert!(matches!(parse(data), Err(Error::UnknownVersion(3))));
     }
 
     #[test]
@@ -565,10 +502,7 @@ mod tests {
             load_entries(&data, "changeit").unwrap(),
             [cert("root-cert")]
         );
-        assert!(matches!(
-            load_entries(&data, ""),
-            Err(KeyStoreError::InvalidDigest)
-        ));
+        assert!(load_entries(&data, "").is_none());
     }
 
     #[test]
@@ -578,24 +512,11 @@ mod tests {
 
     #[test]
     fn preserves_alias_case_when_identifying_entry_types() {
-        let mut keystore = KeyStore::with_options(KeyStoreOptions {
-            case_exact_aliases: true,
-            ..Default::default()
-        });
-        keystore
-            .load(mixed_keystore().as_slice(), b"changeit")
-            .unwrap();
-        let entry = keystore
-            .get_private_key_entry("server-key", b"keypass")
-            .unwrap();
-        keystore.delete_entry("server-key");
-        keystore
-            .set_private_key_entry("MixedCase", entry, b"keypass")
-            .unwrap();
-        let mut data = Vec::new();
-        keystore.store(&mut data, b"changeit").unwrap();
-        let entries = load_entries(&data, "changeit").unwrap();
-        assert_eq!(entries[0].alias, "MixedCase");
-        assert_eq!(entries[0].kind, "Private key");
+        let mut builder = Builder::new(VERSION_02, 1);
+        builder.entry(PRIVATE_KEY_TAG, b"MixedCase", VERSION_02, 1);
+        assert_eq!(
+            load_entries(&builder.finish("changeit"), "changeit").unwrap(),
+            [key("MixedCase")]
+        );
     }
 }
