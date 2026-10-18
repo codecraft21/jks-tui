@@ -38,6 +38,25 @@ keytool -importkeystore -noprompt -srckeystore trusted-cert.jks \
   -deststorepass changeit -destalias 'certificate-😀'
 ```
 
+`empty-password.p12` and `nul-password.p12` contain the same certificate under
+the alias `root-cert`, stored by Java with an empty password and with a single
+NUL character as the password. Java opens both with an empty password. `keytool`
+rejects such short passwords, so recreate them with `jshell` from this directory:
+
+```sh
+jshell -q <<'EOF'
+var source = java.security.KeyStore.getInstance("PKCS12");
+source.load(new java.io.FileInputStream("trusted-cert.p12"), "changeit".toCharArray());
+for (var fixture : new String[][] {{"empty-password.p12", ""}, {"nul-password.p12", "\0"}}) {
+  var store = java.security.KeyStore.getInstance("PKCS12");
+  store.load(null, null);
+  store.setCertificateEntry("root-cert", source.getCertificate("root-cert"));
+  try (var out = new java.io.FileOutputStream(fixture[0])) { store.store(out, fixture[1].toCharArray()); }
+}
+/exit
+EOF
+```
+
 Private-key and secret-key PKCS12 cases are generated only in memory by tests;
 no private key fixture is committed. Neither Java nor `keytool` is needed to run
 the app or its tests.
