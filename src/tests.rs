@@ -110,11 +110,13 @@ fn malformed_counts_report_an_error_and_preserve_the_loaded_keystore() {
 }
 
 #[test]
-fn browser_shows_directories_then_only_jks_files() {
+fn browser_shows_directories_then_supported_keystore_files() {
     let directory = TestDirectory::new();
     fs::create_dir(directory.path().join("z-directory")).unwrap();
     fs::write(directory.path().join("a-keystore.jks"), "").unwrap();
     fs::write(directory.path().join("b-keystore.JKS"), "").unwrap();
+    fs::write(directory.path().join("c-keystore.p12"), "").unwrap();
+    fs::write(directory.path().join("d-keystore.PFX"), "").unwrap();
     fs::write(directory.path().join("ignored.txt"), "").unwrap();
     fs::write(directory.path().join("ignored.jks.bak"), "").unwrap();
 
@@ -123,7 +125,72 @@ fn browser_shows_directories_then_only_jks_files() {
     assert!(rendered.find("../").unwrap() < rendered.find("z-directory/").unwrap());
     assert!(rendered.find("z-directory/").unwrap() < rendered.find("a-keystore.jks").unwrap());
     assert!(rendered.find("a-keystore.jks").unwrap() < rendered.find("b-keystore.JKS").unwrap());
+    assert!(rendered.find("b-keystore.JKS").unwrap() < rendered.find("c-keystore.p12").unwrap());
+    assert!(rendered.find("c-keystore.p12").unwrap() < rendered.find("d-keystore.PFX").unwrap());
     assert!(!rendered.contains("ignored"));
+}
+
+#[test]
+fn pkcs12_renamed_as_jks_opens_after_password_verification() {
+    let directory = TestDirectory::new();
+    let path = directory.path().join("renamed.jks");
+    fs::write(&path, include_bytes!("../tests/fixtures/trusted-cert.p12")).unwrap();
+    let mut app = App::default();
+    app.open_file(path.clone());
+    assert!(app.password_prompt.is_some());
+    type_password(&mut app, "wrong");
+    press(&mut app, KeyCode::Enter);
+    assert!(app.entries.is_empty());
+    type_password(&mut app, "changeit");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.keystore_path, Some(path));
+    assert_eq!(app.entries[0].alias, "root-cert");
+    assert!(!app.incomplete_warning);
+}
+
+#[test]
+fn jks_renamed_as_p12_still_uses_jks_content() {
+    let directory = TestDirectory::new();
+    let path = directory.path().join("renamed.p12");
+    fs::write(&path, empty_keystore()).unwrap();
+    let mut app = App::default();
+    app.open_file(path.clone());
+    assert_eq!(app.keystore_path, Some(path));
+    assert!(app.password_prompt.is_none());
+    assert!(app.error.is_none());
+}
+
+#[test]
+fn truncated_pkcs12_is_rejected_before_password_prompt() {
+    let directory = TestDirectory::new();
+    let path = directory.path().join("truncated.p12");
+    let fixture = include_bytes!("../tests/fixtures/trusted-cert.p12");
+    fs::write(&path, &fixture[..fixture.len() - 1]).unwrap();
+    let mut app = App::default();
+    app.open_file(path);
+    assert!(app.password_prompt.is_none());
+    assert!(red_text(&mut app).contains("not a valid PKCS12 keystore"));
+}
+
+#[test]
+fn partial_pkcs12_warning_persists_with_entries() {
+    let directory = TestDirectory::new();
+    let mut app = App::default();
+    app.show_verified(
+        directory.path().join("partial.p12"),
+        pkcs12::Verified {
+            entries: vec![KeystoreEntry {
+                alias: "readable".into(),
+                kind: "Secret key",
+            }],
+            incomplete: true,
+        },
+    );
+    assert!(screen(&mut app, 100, 24).contains("readable"));
+    assert!(screen(&mut app, 100, 24).contains("entry list is incomplete"));
+    press(&mut app, KeyCode::Char('o'));
+    press(&mut app, KeyCode::Esc);
+    assert!(screen(&mut app, 100, 24).contains("entry list is incomplete"));
 }
 
 #[test]
@@ -246,7 +313,7 @@ fn a_missing_directory_does_not_close_the_browser() {
 fn empty_directories_and_small_terminals_are_handled() {
     let directory = TestDirectory::new();
     let mut app = browsing(directory.path());
-    assert!(screen(&mut app, 100, 24).contains("No .jks files in this directory."));
+    assert!(screen(&mut app, 100, 24).contains("No .jks, .p12, or .pfx files in this directory."));
     press(&mut app, KeyCode::Up);
     press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Home);

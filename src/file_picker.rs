@@ -30,10 +30,12 @@ impl FilePicker {
         for entry in fs::read_dir(&directory)? {
             let path = entry?.path();
             let is_directory = path.is_dir();
-            let is_jks = path
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("jks"));
-            if is_directory || (is_jks && path.is_file()) {
+            let is_keystore = path.extension().is_some_and(|extension| {
+                ["jks", "p12", "pfx"]
+                    .iter()
+                    .any(|ext| extension.eq_ignore_ascii_case(ext))
+            });
+            if is_directory || (is_keystore && path.is_file()) {
                 entries.push(Entry { path, is_directory });
             }
         }
@@ -140,7 +142,7 @@ impl FilePicker {
             horizontal: 2,
             vertical: 1,
         });
-        let block = Block::bordered().title(" Open keystore (.jks) ");
+        let block = Block::bordered().title(" Open keystore (.jks, .p12, .pfx) ");
         let inner = block.inner(area);
         frame.render_widget(Clear, area);
         frame.render_widget(block, area);
@@ -179,7 +181,10 @@ impl FilePicker {
         let (message, color) = if let Some(error) = &self.error {
             (error.as_str(), Color::Red)
         } else if !self.entries.iter().any(|entry| !entry.is_directory) {
-            ("No .jks files in this directory.", Color::Gray)
+            (
+                "No .jks, .p12, or .pfx files in this directory.",
+                Color::Gray,
+            )
         } else {
             ("", Color::Reset)
         };

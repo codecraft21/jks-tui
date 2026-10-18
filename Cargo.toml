@@ -10,3 +10,4 @@ repository = "https://github.com/codecraft21/jks-tui"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 sha1 = { version = "0.10.7", default-features = false }
 zeroize = "1"
+crown = { version = "0.31.1", default-features = false, features = ["alloc"] }

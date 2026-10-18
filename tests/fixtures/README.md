@@ -20,6 +20,28 @@ rmdir "$fixture_dir"
 
 Tests read the committed fixture; Java is not required to run them.
 
+`trusted-cert.p12` and `trusted-cert-legacy.p12` are generated Java PKCS12
+truststores containing the same public certificate. `unicode-alias.p12` contains
+that certificate under the alias `certificate-😀`. Recreate them with:
+
+```sh
+keytool -importkeystore -noprompt -srckeystore trusted-cert.jks \
+  -srcstoretype JKS -srcstorepass changeit -destkeystore trusted-cert.p12 \
+  -deststoretype PKCS12 -deststorepass changeit
+keytool -J-Dkeystore.pkcs12.legacy=true -importkeystore -noprompt \
+  -srckeystore trusted-cert.jks -srcstoretype JKS -srcstorepass changeit \
+  -destkeystore trusted-cert-legacy.p12 -deststoretype PKCS12 \
+  -deststorepass changeit
+keytool -importkeystore -noprompt -srckeystore trusted-cert.jks \
+  -srcstoretype JKS -srcstorepass changeit -srcalias root-cert \
+  -destkeystore unicode-alias.p12 -deststoretype PKCS12 \
+  -deststorepass changeit -destalias 'certificate-😀'
+```
+
+Private-key and secret-key PKCS12 cases are generated only in memory by tests;
+no private key fixture is committed. Neither Java nor `keytool` is needed to run
+the app or its tests.
+
 `unicode-password.jks` and `unicode-alias.jks` are copies of the same trusted
 certificate fixture. The first uses the synthetic test password `pässwörd-😀` to
 exercise Java's UTF-16 password digest encoding. The second keeps `changeit` and
