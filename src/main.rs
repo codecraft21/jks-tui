@@ -1,5 +1,6 @@
 mod file_picker;
 mod keystore;
+mod pkcs12;
 
 #[cfg(test)]
 mod test_support;
@@ -22,7 +23,7 @@ use ratatui::{
 };
 
 use file_picker::FilePicker;
-use keystore::{Keystore, KeystoreEntry};
+use keystore::KeystoreEntry;
 use zeroize::{Zeroize, Zeroizing};
 
 /// Real keystores are far smaller; refuse to read arbitrarily large files.
@@ -67,7 +68,7 @@ impl Password {
 
 struct PasswordPrompt {
     path: PathBuf,
-    keystore: Keystore,
+    keystore: Store,
     password: Password,
 }
 
@@ -79,6 +80,33 @@ struct App {
     entries: Vec<KeystoreEntry>,
     entries_state: TableState,
     error: Option<String>,
+    incomplete_warning: bool,
+}
+
+enum Store {
+    Jks(keystore::Keystore),
+    Pkcs12(pkcs12::Store),
+}
+
+impl Store {
+    fn verify(self, password: &str) -> Result<pkcs12::Verified, Box<(Self, Option<&'static str>)>> {
+        match self {
+            Self::Jks(store) => store
+                .verify(password)
+                .map(|entries| pkcs12::Verified {
+                    entries,
+                    incomplete: false,
+                })
+                .map_err(|store| Box::new((Self::Jks(store), None))),
+            Self::Pkcs12(store) => match store.verify(password) {
+                Ok(verified) => Ok(verified),
+                Err(pkcs12::VerifyError::Password) => Err(Box::new((Self::Pkcs12(store), None))),
+                Err(pkcs12::VerifyError::Invalid(message)) => {
+                    Err(Box::new((Self::Pkcs12(store), Some(message))))
+                }
+            },
+        }
+    }
 }
 
 impl App {
@@ -138,8 +166,12 @@ impl App {
                 let result = keystore.verify(&password.0);
                 password.clear();
                 match result {
-                    Ok(entries) => self.show_entries(path, entries),
-                    Err(keystore) => {
+                    Ok(verified) => self.show_verified(path, verified),
+                    Err(failure) if failure.1.is_some() => {
+                        self.error = Some(failure.1.unwrap().into());
+                    }
+                    Err(failure) => {
+                        let (keystore, _) = *failure;
                         self.password_prompt = Some(PasswordPrompt {
                             path,
                             keystore,
@@ -168,8 +200,12 @@ impl App {
             }
         };
         match keystore.verify("") {
-            Ok(entries) => self.show_entries(path, entries),
-            Err(keystore) => {
+            Ok(verified) => self.show_verified(path, verified),
+            Err(failure) if failure.1.is_some() => {
+                self.error = Some(failure.1.unwrap().into());
+            }
+            Err(failure) => {
+                let (keystore, _) = *failure;
                 self.password_prompt = Some(PasswordPrompt {
                     path,
                     keystore,
@@ -185,6 +221,12 @@ impl App {
             TableState::default().with_selected((!entries.is_empty()).then_some(0));
         self.entries = entries;
         self.error = None;
+        self.incomplete_warning = false;
+    }
+
+    fn show_verified(&mut self, path: PathBuf, verified: pkcs12::Verified) {
+        self.show_entries(path, verified.entries);
+        self.incomplete_warning = verified.incomplete;
     }
 
     fn open_picker(&mut self) {
@@ -249,8 +291,10 @@ impl App {
             }
         } else {
             frame.render_widget(
-                Paragraph::new("No keystore selected.\n\nPress o to open a .jks file.")
-                    .block(Block::bordered().title(" jks-tui ")),
+                Paragraph::new(
+                    "No keystore selected.\n\nPress o to open a .jks, .p12, or .pfx file.",
+                )
+                .block(Block::bordered().title(" jks-tui ")),
                 content,
             );
         }
@@ -259,6 +303,12 @@ impl App {
                 Paragraph::new(error.as_str())
                     .style(Style::default().fg(Color::Red))
                     .wrap(Wrap { trim: false }),
+                status,
+            );
+        } else if self.incomplete_warning && self.file_picker.is_none() {
+            frame.render_widget(
+                Paragraph::new("Warning: this PKCS12 entry list is incomplete.")
+                    .style(Style::default().fg(Color::Yellow)),
                 status,
             );
         }
@@ -283,11 +333,26 @@ fn is_text_input(modifiers: KeyModifiers) -> bool {
     (cfg!(windows) && control && alt) || (!control && !alt)
 }
 
-fn load(path: &Path) -> Result<Keystore, String> {
+fn load(path: &Path) -> Result<Store, String> {
     let data = read_limited(path, MAX_KEYSTORE_SIZE)
         .map_err(|error| format!("Cannot read {}: {error}", path.display()))?;
-    keystore::parse(data)
-        .map_err(|error| format!("{} is not a valid JKS keystore: {error}", path.display()))
+    if data.starts_with(&keystore::MAGIC.to_be_bytes()) {
+        keystore::parse(data)
+            .map(Store::Jks)
+            .map_err(|error| format!("{} is not a valid JKS keystore: {error}", path.display()))
+    } else if data.first() == Some(&0x30)
+        || path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("p12") || ext.eq_ignore_ascii_case("pfx"))
+    {
+        pkcs12::parse(&data)
+            .map(Store::Pkcs12)
+            .map_err(|error| format!("{} is not a valid PKCS12 keystore: {error}", path.display()))
+    } else {
+        keystore::parse(data)
+            .map(Store::Jks)
+            .map_err(|error| format!("{} is not a valid JKS keystore: {error}", path.display()))
+    }
 }
 
 fn read_limited(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
