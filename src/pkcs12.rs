@@ -233,6 +233,8 @@ mod tests {
     const MODERN: &[u8] = include_bytes!("../tests/fixtures/trusted-cert.p12");
     const LEGACY: &[u8] = include_bytes!("../tests/fixtures/trusted-cert-legacy.p12");
     const UNICODE_ALIAS: &[u8] = include_bytes!("../tests/fixtures/unicode-alias.p12");
+    const EMPTY_PASSWORD: &[u8] = include_bytes!("../tests/fixtures/empty-password.p12");
+    const NUL_PASSWORD: &[u8] = include_bytes!("../tests/fixtures/nul-password.p12");
 
     struct TestRng(u8);
     impl Rng for TestRng {
@@ -376,6 +378,28 @@ mod tests {
                 .encode();
             let verified = parse(&data).unwrap().verify("").unwrap();
             assert!(verified.entries.is_empty());
+            assert!(!verified.incomplete);
+        }
+    }
+
+    #[test]
+    fn opens_java_empty_and_nul_password_stores_with_an_empty_password() {
+        // Java's empty-password store only opens through the NUL fallback.
+        assert!(parse(EMPTY_PASSWORD).unwrap().0.verify_mac(b"").is_err());
+        for data in [EMPTY_PASSWORD, NUL_PASSWORD] {
+            let store = parse(data).unwrap();
+            assert!(matches!(
+                store.verify("changeit"),
+                Err(VerifyError::Password)
+            ));
+            let verified = store.verify("").unwrap();
+            assert_eq!(
+                verified.entries,
+                vec![KeystoreEntry {
+                    alias: "root-cert".into(),
+                    kind: "Trusted certificate"
+                }]
+            );
             assert!(!verified.incomplete);
         }
     }
