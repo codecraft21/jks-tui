@@ -40,7 +40,7 @@ impl TestDirectory {
     pub fn new() -> Self {
         static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
-            "jks-tui-test-{}-{}",
+            "keystore-tui-test-{}-{}",
             std::process::id(),
             NEXT_ID.fetch_add(1, Ordering::Relaxed)
         ));
