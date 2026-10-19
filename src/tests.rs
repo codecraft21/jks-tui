@@ -4,12 +4,14 @@ use std::{
     path::Path,
 };
 
+use crown::asn1::Asn1Time;
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
 use super::*;
+use certificate::Summary;
 use test_support::{
     KEYTOOL_JKS, TestDirectory, UNICODE_ALIAS_JKS, UNICODE_PASSWORD_JKS, empty_keystore,
-    mixed_keystore,
+    fixture_summary, mixed_keystore,
 };
 
 fn browsing(directory: &Path) -> App {
@@ -203,6 +205,52 @@ fn pkcs12_renamed_as_jks_opens_after_password_verification() {
 }
 
 #[test]
+fn entry_list_shows_certificate_algorithm_key_size_and_expiry() {
+    let mut app = App::default();
+    let expired = Summary {
+        not_after: Asn1Time::new(2001, 2, 3, 0, 0, 0, true).unwrap(),
+        ..fixture_summary()
+    };
+    app.show_entries(
+        PathBuf::from("/keystore.jks"),
+        vec![
+            KeystoreEntry {
+                alias: "current".into(),
+                kind: "Trusted certificate",
+                certificate: Some(fixture_summary()),
+            },
+            KeystoreEntry {
+                alias: "expired".into(),
+                kind: "Private key",
+                certificate: Some(expired),
+            },
+            KeystoreEntry {
+                alias: "secret".into(),
+                kind: "Secret key",
+                certificate: None,
+            },
+        ],
+    );
+    let screen = screen(&mut app, 80, 24);
+    for text in [
+        "Algorithm",
+        "Key size",
+        "Expires",
+        "EC",
+        "256 bits",
+        "2036-10-09",
+    ] {
+        assert!(screen.contains(text), "{text}\n{screen}");
+    }
+    assert!(
+        screen
+            .lines()
+            .any(|line| line.contains("secret") && line.contains("-"))
+    );
+    assert_eq!(red_text(&mut app), "2001-02-03");
+}
+
+#[test]
 fn jks_renamed_as_p12_still_uses_jks_content() {
     let directory = TestDirectory::new();
     let path = directory.path().join("renamed.p12");
@@ -236,6 +284,7 @@ fn partial_pkcs12_warning_persists_with_entries() {
             entries: vec![KeystoreEntry {
                 alias: "readable".into(),
                 kind: "Secret key",
+                certificate: None,
             }],
             incomplete: true,
         },
@@ -509,6 +558,7 @@ fn entry_list_scrolls_to_entries_below_the_viewport() {
             .map(|index| KeystoreEntry {
                 alias: format!("entry-{index:02}"),
                 kind: "Trusted certificate",
+                certificate: None,
             })
             .collect(),
     );
