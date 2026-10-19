@@ -36,8 +36,10 @@ verify it. Input is masked; `Backspace` deletes a character and `Esc` cancels.
 Keys pressed with `Ctrl` or `Alt` are not typed into the password, except that on
 Windows `Ctrl+Alt` (how Windows reports `AltGr`) types its character. The password
 input buffer is wiped after each attempt and when a character is deleted.
-Empty-password keystores open immediately. The main view shows the keystore's
-absolute path and a table of entries with these columns:
+Empty-password keystores open immediately. A status bar above the keyboard
+shortcuts shows the opened keystore's absolute path as `Path: '<path>'`. Long paths
+are clipped to the terminal width. The main view shows a table of entries with
+these columns:
 
 | Column | Shows |
 | --- | --- |
