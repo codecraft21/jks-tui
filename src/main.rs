@@ -248,9 +248,10 @@ impl App {
     }
 
     fn draw(&mut self, frame: &mut Frame) {
-        let [content, status, help] = Layout::vertical([
+        let [content, status, path_bar, help] = Layout::vertical([
             Constraint::Min(3),
             Constraint::Length(2),
+            Constraint::Length(1),
             Constraint::Length(1),
         ])
         .areas(frame.area());
@@ -265,12 +266,8 @@ impl App {
                 .wrap(Wrap { trim: false }),
                 content,
             );
-        } else if let Some(path) = &self.keystore_path {
-            let block = Block::bordered().title(format!(
-                " {} | {} entries ",
-                path.display(),
-                self.entries.len()
-            ));
+        } else if self.keystore_path.is_some() {
+            let block = Block::bordered().title(" keystore-tui ");
             if self.entries.is_empty() {
                 frame.render_widget(
                     Paragraph::new("This keystore contains no entries.").block(block),
@@ -336,6 +333,12 @@ impl App {
                 Paragraph::new("Warning: this PKCS12 entry list is incomplete.")
                     .style(Style::default().fg(Color::Yellow)),
                 status,
+            );
+        }
+        if let Some(path) = &self.keystore_path {
+            frame.render_widget(
+                Paragraph::new(format!("Path: '{}'", path.display())),
+                path_bar,
             );
         }
         if let Some(picker) = &mut self.file_picker {

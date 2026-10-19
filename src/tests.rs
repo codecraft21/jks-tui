@@ -310,7 +310,15 @@ fn selecting_a_valid_empty_keystore_displays_its_absolute_path() {
     let expected = path.canonicalize().unwrap();
     assert_eq!(app.keystore_path.as_deref(), Some(expected.as_path()));
     assert!(app.file_picker.is_none());
-    assert!(screen(&mut app, 200, 24).contains(expected.to_str().unwrap()));
+    let rendered = screen(&mut app, 200, 24);
+    assert_eq!(
+        rendered.lines().nth(22).unwrap().trim_end(),
+        format!("Path: '{}'", expected.display())
+    );
+    let title = rendered.lines().next().unwrap();
+    assert!(title.contains(" keystore-tui "));
+    assert!(!title.contains(expected.to_str().unwrap()));
+    assert!(!title.contains("entries"));
     assert!(screen(&mut app, 200, 24).contains("This keystore contains no entries."));
     assert!(app.password_prompt.is_none());
     assert_eq!(fs::read(&path).unwrap(), data);
@@ -365,6 +373,7 @@ fn reopening_and_cancelling_preserves_the_previous_keystore() {
     press(&mut app, KeyCode::End);
     assert!(!press(&mut app, KeyCode::Esc));
     assert!(app.file_picker.is_none());
+    assert!(screen(&mut app, 200, 24).contains(&format!("Path: '{}'", original.display())));
     assert_eq!(app.keystore_path, Some(original));
 
     app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
@@ -457,10 +466,13 @@ fn invalid_file_shows_a_red_error_and_valid_selection_recovers() {
         "Trusted certificate",
         "server-key",
         "Private key",
-        "2 entries",
+        "keystore-tui",
     ] {
         assert!(content.contains(expected), "missing {expected}");
     }
+    let title = content.lines().next().unwrap();
+    assert!(!title.contains("entries"));
+    assert!(!title.contains("b-valid.jks"));
     assert!(red_text(&mut app).is_empty());
 }
 
@@ -526,6 +538,10 @@ fn cancelling_a_password_prompt_preserves_the_loaded_entries() {
     assert!(!press(&mut app, KeyCode::Esc));
     assert!(app.password_prompt.is_none());
     assert_eq!(app.keystore_path, Some(original.canonicalize().unwrap()));
+    assert!(screen(&mut app, 200, 24).contains(&format!(
+        "Path: '{}'",
+        original.canonicalize().unwrap().display()
+    )));
     assert_eq!(app.entries.len(), 2);
     assert!(screen(&mut app, 100, 24).contains("server-key"));
 
@@ -544,8 +560,27 @@ fn a_read_failure_is_reported_in_red_without_losing_the_loaded_keystore() {
     app.open_file(original.clone());
     app.open_file(directory.path().join("missing.jks"));
     assert!(red_text(&mut app).contains("Cannot read"));
+    assert!(screen(&mut app, 200, 24).contains(&format!("Path: '{}'", original.display())));
     assert_eq!(app.keystore_path, Some(original));
     assert!(app.password_prompt.is_none());
+}
+
+#[test]
+fn path_bar_is_blank_until_loaded_and_clips_without_wrapping() {
+    let mut app = App::default();
+    assert_eq!(screen(&mut app, 40, 12).lines().nth(10).unwrap().trim(), "");
+
+    app.show_entries(PathBuf::from("/a long directory/keystore.jks"), vec![]);
+    app.error = Some("An opening error".to_string());
+    let rendered = screen(&mut app, 20, 12);
+    let lines: Vec<_> = rendered.lines().collect();
+    assert_eq!(lines[8].trim_end(), "An opening error");
+    assert_eq!(lines[10], "Path: '/a long direc");
+    assert!(lines[11].starts_with("o Open keystore"));
+
+    for (width, height) in [(1, 1), (5, 3), (20, 5), (0, 0)] {
+        buffer(&mut app, width, height);
+    }
 }
 
 #[test]
