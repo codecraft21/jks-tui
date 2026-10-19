@@ -77,6 +77,9 @@ the terminal when it exits.
 
 ## Development
 
+Cargo sets `TMPDIR` to the repository root for builds and tests, so temporary
+files stay within the workspace when the system temporary directory is unavailable.
+
 ```sh
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
