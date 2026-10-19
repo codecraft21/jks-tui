@@ -1,4 +1,4 @@
-# jks-tui
+# keystore-tui
 
 TUI for Java KeyStore and Java PKCS12 files, built with Rust and Ratatui.
 

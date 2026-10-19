@@ -1,10 +1,10 @@
 [package]
-name = "jks-tui"
+name = "keystore-tui"
 version = "0.1.0"
 edition = "2024"
 description = "TUI for Java KeyStore files"
 license = "Apache-2.0"
-repository = "https://github.com/codecraft21/jks-tui"
+repository = "https://github.com/codecraft21/keystore-tui"
 
 [dependencies]
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
