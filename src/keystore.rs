@@ -3,6 +3,8 @@ use std::fmt;
 use sha1::{Digest, Sha1};
 use zeroize::Zeroize;
 
+use crate::certificate::{self, Summary};
+
 pub(crate) const MAGIC: u32 = 0xfeed_feed;
 pub(crate) const VERSION_01: u32 = 1;
 pub(crate) const VERSION_02: u32 = 2;
@@ -38,6 +40,8 @@ impl std::error::Error for Error {}
 pub struct KeystoreEntry {
     pub alias: String,
     pub kind: &'static str,
+    /// The entry's certificate, or the first of a private key's chain.
+    pub certificate: Option<Summary>,
 }
 
 /// A structurally valid keystore whose integrity digest has not been checked.
@@ -75,24 +79,32 @@ pub fn parse(mut data: Vec<u8>) -> Result<Keystore, Error> {
         let tag = reader.u32()?;
         let alias = reader.string()?;
         reader.take(8)?; // Creation timestamp; listing does not need it.
-        let kind = match tag {
+        let (kind, certificate) = match tag {
             PRIVATE_KEY_TAG => {
                 // Encrypted key bytes remain opaque. Like Java, accept any
                 // length (even empty) and a key entry without a chain.
                 reader.payload()?;
                 let cert_count = reader.count(if version == VERSION_01 { 4 } else { 6 })?;
-                for _ in 0..cert_count {
-                    reader.certificate(version)?;
+                let mut leaf = None;
+                for index in 0..cert_count {
+                    let encoding = reader.certificate(version)?;
+                    if index == 0 {
+                        leaf = certificate::summarize(encoding);
+                    }
                 }
-                "Private key"
+                ("Private key", leaf)
             }
             TRUSTED_CERT_TAG => {
-                reader.certificate(version)?;
-                "Trusted certificate"
+                let encoding = reader.certificate(version)?;
+                ("Trusted certificate", certificate::summarize(encoding))
             }
             _ => return Err(Error::UnknownEntryTag(tag)),
         };
-        entries.push(KeystoreEntry { alias, kind });
+        entries.push(KeystoreEntry {
+            alias,
+            kind,
+            certificate,
+        });
     }
     let body_len = data.len() - reader.remaining.len();
     reader.take(DIGEST_LEN)?;
@@ -173,17 +185,18 @@ impl<'a> Reader<'a> {
         self.take(len)
     }
 
-    fn certificate(&mut self, version: u32) -> Result<(), Error> {
+    fn certificate(&mut self, version: u32) -> Result<&'a [u8], Error> {
         // Java resolves the type with CertificateFactory (case-insensitively),
         // and standard providers only support X.509. Version 1 implies X.509.
         if version == VERSION_02 && !self.string()?.eq_ignore_ascii_case(CERTIFICATE_TYPE) {
             return Err(Error::Invalid("unsupported certificate type in JKS data"));
         }
         // Java fails to load a keystore whose certificate encoding is empty.
-        if self.payload()?.is_empty() {
+        let encoding = self.payload()?;
+        if encoding.is_empty() {
             return Err(Error::Invalid("empty certificate in JKS data"));
         }
-        Ok(())
+        Ok(encoding)
     }
 
     fn string(&mut self) -> Result<String, Error> {
@@ -239,12 +252,13 @@ mod tests {
     use super::*;
     use crate::test_support::{
         Builder, KEYTOOL_JKS, UNICODE_ALIAS_JKS, UNICODE_PASSWORD_JKS, empty_keystore,
-        mixed_keystore,
+        fixture_certificate_der, fixture_summary, mixed_keystore,
     };
     fn key(alias: &str) -> KeystoreEntry {
         KeystoreEntry {
             alias: alias.into(),
             kind: "Private key",
+            certificate: None,
         }
     }
 
@@ -252,7 +266,33 @@ mod tests {
         KeystoreEntry {
             alias: alias.into(),
             kind: "Trusted certificate",
+            certificate: None,
         }
+    }
+
+    fn fixture_cert(alias: &str) -> KeystoreEntry {
+        KeystoreEntry {
+            certificate: Some(fixture_summary()),
+            ..cert(alias)
+        }
+    }
+
+    #[test]
+    fn summarizes_the_first_certificate_of_a_private_key_chain() {
+        let mut data = Builder::new(VERSION_02, 1);
+        data.entry_header(PRIVATE_KEY_TAG, b"key");
+        data.payload(b"synthetic test payload, not a private key");
+        data.u32_field(2);
+        data.raw_string(CERTIFICATE_TYPE.as_bytes());
+        data.payload(fixture_certificate_der());
+        data.certificate(VERSION_02);
+        assert_eq!(
+            load_entries(&data.finish(""), "").unwrap(),
+            [KeystoreEntry {
+                certificate: Some(fixture_summary()),
+                ..key("key")
+            }]
+        );
     }
 
     #[test]
@@ -274,7 +314,7 @@ mod tests {
         }
         assert_eq!(
             keystore.verify("changeit").ok().unwrap(),
-            [cert("root-cert")]
+            [fixture_cert("root-cert")]
         );
     }
 
@@ -282,7 +322,7 @@ mod tests {
     fn reads_java_aliases_with_supplementary_characters() {
         assert_eq!(
             load_entries(UNICODE_ALIAS_JKS, "changeit").unwrap(),
-            [cert("certificate-😀")]
+            [fixture_cert("certificate-😀")]
         );
     }
 
@@ -447,7 +487,7 @@ mod tests {
     fn reads_a_java_generated_keystore() {
         assert_eq!(
             load_entries(KEYTOOL_JKS, "changeit").unwrap(),
-            [cert("root-cert")]
+            [fixture_cert("root-cert")]
         );
     }
 
@@ -500,7 +540,7 @@ mod tests {
         data.extend_from_slice(b"\0trailing");
         assert_eq!(
             load_entries(&data, "changeit").unwrap(),
-            [cert("root-cert")]
+            [fixture_cert("root-cert")]
         );
         assert!(load_entries(&data, "").is_none());
     }
