@@ -320,7 +320,7 @@ impl App {
                 Paragraph::new(
                     "No keystore selected.\n\nPress o to open a .jks, .p12, or .pfx file.",
                 )
-                .block(Block::bordered().title(" jks-tui ")),
+                .block(Block::bordered().title(" keystore-tui ")),
                 content,
             );
         }
@@ -414,7 +414,7 @@ fn main() -> ExitCode {
         Err(err) => {
             // Undo raw mode in case it was enabled before the failure.
             let _ = ratatui::try_restore();
-            eprintln!("jks-tui must be run in an interactive terminal: {err}");
+            eprintln!("keystore-tui must be run in an interactive terminal: {err}");
             return ExitCode::FAILURE;
         }
     };
@@ -423,7 +423,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("jks-tui: {err}");
+            eprintln!("keystore-tui: {err}");
             ExitCode::FAILURE
         }
     }
