@@ -4,7 +4,8 @@ TUI for Java KeyStore and Java PKCS12 files, built with Rust and Ratatui.
 
 Open a `.jks`, `.p12`, or `.pfx` file with the built-in terminal file browser and
 list its entry aliases and types (private keys, trusted certificates, or PKCS12
-secret keys). The format is detected from the file content, so a PKCS12 store
+secret keys), with each certificate's public key algorithm, key size, and expiry
+date. The format is detected from the file content, so a PKCS12 store
 renamed `.jks` also opens.
 
 ## Run
@@ -36,7 +37,20 @@ Keys pressed with `Ctrl` or `Alt` are not typed into the password, except that o
 Windows `Ctrl+Alt` (how Windows reports `AltGr`) types its character. The password
 input buffer is wiped after each attempt and when a character is deleted.
 Empty-password keystores open immediately. The main view shows the keystore's
-absolute path and a list of entry aliases and types. Use `Up` / `Down` or `j` / `k`
+absolute path and a table of entries with these columns:
+
+| Column | Shows |
+| --- | --- |
+| Alias | The entry alias |
+| Type | Private key, Trusted certificate, or Secret key |
+| Algorithm | The certificate's public key algorithm (RSA, EC, DSA, Ed25519, ...) |
+| Key size | The key size in bits (RSA/DSA modulus, EC curve size) |
+| Expires | The certificate's expiry date (UTC), in red once it has passed |
+
+For a private key, the certificate is the first one in its chain (for PKCS12, the
+certificate sharing the key's local key ID). Secret keys, and certificates that
+cannot be read, show `-` in these columns. Unrecognized algorithms show their
+OID. Use `Up` / `Down` or `j` / `k`
 to scroll the entries, or `o` to open another file. Cancelling the browser or the
 password prompt keeps the previously loaded keystore.
 

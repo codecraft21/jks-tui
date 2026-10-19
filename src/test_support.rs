@@ -4,6 +4,9 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+use crown::asn1::Asn1Time;
+
+use crate::certificate::Summary;
 use crate::keystore::{
     CERTIFICATE_TYPE, MAGIC, PRIVATE_KEY_TAG, TRUSTED_CERT_TAG, VERSION_02, digest_of,
 };
@@ -11,6 +14,23 @@ use crate::keystore::{
 pub const KEYTOOL_JKS: &[u8] = include_bytes!("../tests/fixtures/trusted-cert.jks");
 pub const UNICODE_PASSWORD_JKS: &[u8] = include_bytes!("../tests/fixtures/unicode-password.jks");
 pub const UNICODE_ALIAS_JKS: &[u8] = include_bytes!("../tests/fixtures/unicode-alias.jks");
+
+/// The DER certificate stored in `KEYTOOL_JKS` under the alias `root-cert`.
+pub fn fixture_certificate_der() -> &'static [u8] {
+    // Header, tag, alias, timestamp and the "X.509" type precede its length.
+    let offset = 12 + 4 + 2 + "root-cert".len() + 8 + 2 + CERTIFICATE_TYPE.len();
+    let len = u32::from_be_bytes(KEYTOOL_JKS[offset..offset + 4].try_into().unwrap()) as usize;
+    &KEYTOOL_JKS[offset + 4..offset + 4 + len]
+}
+
+/// What the entry list shows for the fixture certificate.
+pub fn fixture_summary() -> Summary {
+    Summary {
+        algorithm: "EC".into(),
+        key_size: Some(256),
+        not_after: Asn1Time::new(2036, 10, 9, 19, 48, 29, true).unwrap(),
+    }
+}
 
 pub struct TestDirectory {
     path: PathBuf,

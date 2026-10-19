@@ -10,7 +10,7 @@ use crown::{
 };
 use zeroize::Zeroizing;
 
-use crate::keystore::KeystoreEntry;
+use crate::{certificate, keystore::KeystoreEntry};
 
 const MAX_ITERATIONS: u32 = 1_000_000;
 const MAX_SALT_SIZE: usize = 64;
@@ -113,23 +113,30 @@ impl Store {
             }
         }
 
-        let mut keys = Vec::new();
+        let mut entries = Vec::new();
         for bag in &bags {
             if matches!(bag.bag, Bag::ShroudedKey(_)) {
                 if let Some(alias) = bag.friendly_name() {
-                    keys.push(alias);
+                    // Java gives the key and its end-entity certificate the
+                    // same local key ID.
+                    let certificate = bag.local_key_id().and_then(|id| {
+                        bags.iter().find_map(|other| match &other.bag {
+                            Bag::Cert(cert) if other.local_key_id().as_ref() == Some(&id) => {
+                                certificate::summarize(&cert.encode())
+                            }
+                            _ => None,
+                        })
+                    });
+                    entries.push(KeystoreEntry {
+                        alias,
+                        kind: "Private key",
+                        certificate,
+                    });
                 } else {
                     incomplete = true;
                 }
             }
         }
-        let mut entries: Vec<KeystoreEntry> = keys
-            .into_iter()
-            .map(|alias| KeystoreEntry {
-                alias,
-                kind: "Private key",
-            })
-            .collect();
         for bag in &bags {
             match &bag.bag {
                 Bag::Secret { .. } => {
@@ -137,12 +144,13 @@ impl Store {
                         entries.push(KeystoreEntry {
                             alias,
                             kind: "Secret key",
+                            certificate: None,
                         });
                     } else {
                         incomplete = true;
                     }
                 }
-                Bag::Cert(_) => {
+                Bag::Cert(cert) => {
                     // Java identifies trusted entries with its trustedKeyUsage attribute.
                     if !bag
                         .attributes
@@ -159,6 +167,7 @@ impl Store {
                             entries.push(KeystoreEntry {
                                 alias,
                                 kind: "Trusted certificate",
+                                certificate: certificate::summarize(&cert.encode()),
                             });
                         }
                     } else {
@@ -219,11 +228,13 @@ fn decrypt_safe(content: &[u8], password: &[u8]) -> Result<Vec<u8>, CryptoError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{fixture_certificate_der, fixture_summary};
     use crown::{
         asn1::{der, oid::ObjectIdentifier},
         pkcs12::SafeBag,
         rng::Rng,
         x509::{
+            Certificate,
             algorithm::AlgorithmIdentifier,
             attribute::{friendly_name, local_key_id},
             keys::EncryptedPrivateKeyInfo,
@@ -262,7 +273,8 @@ mod tests {
                 verified.entries,
                 vec![KeystoreEntry {
                     alias: "root-cert".into(),
-                    kind: "Trusted certificate"
+                    kind: "Trusted certificate",
+                    certificate: Some(fixture_summary()),
                 }]
             );
             assert!(!verified.incomplete);
@@ -315,15 +327,45 @@ mod tests {
             vec![
                 KeystoreEntry {
                     alias: "private".into(),
-                    kind: "Private key"
+                    kind: "Private key",
+                    certificate: None,
                 },
                 KeystoreEntry {
                     alias: "secret".into(),
-                    kind: "Secret key"
+                    kind: "Secret key",
+                    certificate: None,
                 },
             ]
         );
         assert!(verified.incomplete);
+    }
+
+    #[test]
+    fn summarizes_the_certificate_sharing_a_private_key_id() {
+        let key = |alias, id: &[u8]| SafeBag {
+            bag: Bag::ShroudedKey(EncryptedPrivateKeyInfo {
+                algorithm: AlgorithmIdentifier::with_null(
+                    ObjectIdentifier::new(oid::OID_PBES2).unwrap(),
+                ),
+                encrypted_data: vec![1, 2, 3],
+            }),
+            attributes: vec![friendly_name(alias), local_key_id(id)],
+        };
+        let certificate = SafeBag {
+            bag: Bag::Cert(Certificate::parse(fixture_certificate_der()).unwrap()),
+            attributes: vec![friendly_name("matched"), local_key_id(&[2])],
+        };
+        let data = synthetic(vec![
+            key("matched", &[2]),
+            key("unmatched", &[3]),
+            certificate,
+        ]);
+        let verified = parse(&data).unwrap().verify("changeit").unwrap();
+        assert_eq!(verified.entries[0].alias, "matched");
+        assert_eq!(verified.entries[0].certificate, Some(fixture_summary()));
+        assert_eq!(verified.entries[1].alias, "unmatched");
+        assert_eq!(verified.entries[1].certificate, None);
+        assert!(!verified.incomplete);
     }
 
     #[test]
@@ -397,7 +439,8 @@ mod tests {
                 verified.entries,
                 vec![KeystoreEntry {
                     alias: "root-cert".into(),
-                    kind: "Trusted certificate"
+                    kind: "Trusted certificate",
+                    certificate: Some(fixture_summary()),
                 }]
             );
             assert!(!verified.incomplete);
