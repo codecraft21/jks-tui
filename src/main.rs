@@ -1,3 +1,4 @@
+mod certificate;
 mod file_picker;
 mod keystore;
 mod pkcs12;
@@ -12,6 +13,7 @@ use std::{
     io::{self, Read},
     path::{Path, PathBuf},
     process::ExitCode,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use ratatui::{
@@ -19,7 +21,7 @@ use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     layout::{Constraint, Layout},
     style::{Color, Style, Stylize},
-    widgets::{Block, Paragraph, Row, Table, TableState, Wrap},
+    widgets::{Block, Cell, Paragraph, Row, Table, TableState, Wrap},
 };
 
 use file_picker::FilePicker;
@@ -275,15 +277,39 @@ impl App {
                     content,
                 );
             } else {
-                let rows = self
-                    .entries
-                    .iter()
-                    .map(|entry| Row::new([entry.alias.as_str(), entry.kind]));
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |elapsed| elapsed.as_secs() as i64);
+                let rows = self.entries.iter().map(|entry| {
+                    let mut cells = vec![Cell::from(entry.alias.as_str()), Cell::from(entry.kind)];
+                    match &entry.certificate {
+                        Some(summary) => {
+                            let expiry = Cell::from(summary.expiry_text());
+                            cells.extend([
+                                Cell::from(summary.algorithm.as_str()),
+                                Cell::from(summary.key_size_text()),
+                                if summary.is_expired(now) {
+                                    expiry.red()
+                                } else {
+                                    expiry
+                                },
+                            ]);
+                        }
+                        None => cells.extend(["-", "-", "-"].map(Cell::from)),
+                    }
+                    Row::new(cells)
+                });
                 let table = Table::new(
                     rows,
-                    [Constraint::Percentage(60), Constraint::Percentage(40)],
+                    [
+                        Constraint::Fill(1),
+                        Constraint::Length(19),
+                        Constraint::Length(10),
+                        Constraint::Length(9),
+                        Constraint::Length(10),
+                    ],
                 )
-                .header(Row::new(["Alias", "Type"]).bold())
+                .header(Row::new(["Alias", "Type", "Algorithm", "Key size", "Expires"]).bold())
                 .block(block)
                 .row_highlight_style(Style::default().bg(Color::DarkGray).bold())
                 .highlight_symbol("> ");
