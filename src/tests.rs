@@ -248,6 +248,35 @@ fn entry_list_shows_certificate_algorithm_key_size_and_expiry() {
             .any(|line| line.contains("secret") && line.contains("-"))
     );
     assert_eq!(red_text(&mut app), "2001-02-03");
+
+    press(&mut app, KeyCode::Down);
+    let rendered = buffer(&mut app, 80, 24);
+    let selected_row = rendered
+        .content
+        .chunks(80)
+        .find(|row| row.iter().any(|cell| cell.symbol() == ">"))
+        .unwrap();
+    let expiry_start = selected_row
+        .windows(10)
+        .position(|cells| {
+            cells.iter().map(|cell| cell.symbol()).collect::<String>() == "2001-02-03"
+        })
+        .unwrap();
+    for (index, cell) in selected_row.iter().enumerate().skip(1).take(78) {
+        assert_eq!(cell.bg, Color::Rgb(175, 255, 255));
+        assert!(cell.modifier.contains(ratatui::style::Modifier::BOLD));
+        assert_eq!(
+            cell.fg,
+            if (expiry_start..expiry_start + 10).contains(&index) {
+                Color::Rgb(128, 0, 0)
+            } else {
+                Color::Rgb(0, 0, 0)
+            }
+        );
+    }
+    assert!(red_text(&mut app).is_empty());
+    press(&mut app, KeyCode::Down);
+    assert_eq!(red_text(&mut app), "2001-02-03");
 }
 
 #[test]
