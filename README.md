@@ -57,6 +57,10 @@ OID. Use `Up` / `Down` or `j` / `k`
 to scroll the entries, or `o` to open another file. Cancelling the browser or the
 password prompt keeps the previously loaded keystore.
 
+The selected entry uses bold black text on a light cyan background, with explicit
+RGB colors for consistent contrast across terminal palettes, and a `>` marker.
+Expired dates on the selected row use dark red; unselected expired dates stay red.
+
 The app checks the JKS header, lengths, counts, and structure before asking for a
 password. For PKCS12, it checks the outer structure and requires an integrity MAC.
 Entries are shown only after the password-based integrity check succeeds. Java

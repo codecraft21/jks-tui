@@ -277,7 +277,9 @@ impl App {
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_or(0, |elapsed| elapsed.as_secs() as i64);
-                let rows = self.entries.iter().map(|entry| {
+                let selected = self.entries_state.selected();
+                let rows = self.entries.iter().enumerate().map(|(index, entry)| {
+                    let is_selected = selected == Some(index);
                     let mut cells = vec![Cell::from(entry.alias.as_str()), Cell::from(entry.kind)];
                     match &entry.certificate {
                         Some(summary) => {
@@ -286,7 +288,11 @@ impl App {
                                 Cell::from(summary.algorithm.as_str()),
                                 Cell::from(summary.key_size_text()),
                                 if summary.is_expired(now) {
-                                    expiry.red()
+                                    expiry.fg(if is_selected {
+                                        Color::Rgb(128, 0, 0)
+                                    } else {
+                                        Color::Red
+                                    })
                                 } else {
                                     expiry
                                 },
@@ -294,7 +300,17 @@ impl App {
                         }
                         None => cells.extend(["-", "-", "-"].map(Cell::from)),
                     }
-                    Row::new(cells)
+                    let row = Row::new(cells);
+                    if is_selected {
+                        row.style(
+                            Style::default()
+                                .fg(Color::Rgb(0, 0, 0))
+                                .bg(Color::Rgb(175, 255, 255))
+                                .bold(),
+                        )
+                    } else {
+                        row
+                    }
                 });
                 let table = Table::new(
                     rows,
@@ -308,7 +324,6 @@ impl App {
                 )
                 .header(Row::new(["Alias", "Type", "Algorithm", "Key size", "Expires"]).bold())
                 .block(block)
-                .row_highlight_style(Style::default().bg(Color::DarkGray).bold())
                 .highlight_symbol("> ");
                 frame.render_stateful_widget(table, content, &mut self.entries_state);
             }
