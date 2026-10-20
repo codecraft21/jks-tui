@@ -288,11 +288,13 @@ impl App {
                                 Cell::from(summary.algorithm.as_str()),
                                 Cell::from(summary.key_size_text()),
                                 if summary.is_expired(now) {
-                                    expiry.fg(if is_selected {
-                                        Color::Rgb(128, 0, 0)
+                                    if is_selected {
+                                        expiry
+                                            .fg(Color::Rgb(255, 255, 255))
+                                            .bg(Color::Rgb(128, 0, 0))
                                     } else {
-                                        Color::Red
-                                    })
+                                        expiry.fg(Color::Red)
+                                    }
                                 } else {
                                     expiry
                                 },

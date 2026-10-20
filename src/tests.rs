@@ -263,12 +263,20 @@ fn entry_list_shows_certificate_algorithm_key_size_and_expiry() {
         })
         .unwrap();
     for (index, cell) in selected_row.iter().enumerate().skip(1).take(78) {
-        assert_eq!(cell.bg, Color::Rgb(175, 255, 255));
+        let is_expiry = (expiry_start..expiry_start + 10).contains(&index);
+        assert_eq!(
+            cell.bg,
+            if is_expiry {
+                Color::Rgb(128, 0, 0)
+            } else {
+                Color::Rgb(175, 255, 255)
+            }
+        );
         assert!(cell.modifier.contains(ratatui::style::Modifier::BOLD));
         assert_eq!(
             cell.fg,
-            if (expiry_start..expiry_start + 10).contains(&index) {
-                Color::Rgb(128, 0, 0)
+            if is_expiry {
+                Color::Rgb(255, 255, 255)
             } else {
                 Color::Rgb(0, 0, 0)
             }
