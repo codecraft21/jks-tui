@@ -59,7 +59,8 @@ password prompt keeps the previously loaded keystore.
 
 The selected entry uses bold black text on a light cyan background, with explicit
 RGB colors for consistent contrast across terminal palettes, and a `>` marker.
-Expired dates on the selected row use dark red; unselected expired dates stay red.
+Expired dates on the selected row use bold white text on a dark red background
+for contrast; unselected expired dates stay red.
 
 The app checks the JKS header, lengths, counts, and structure before asking for a
 password. For PKCS12, it checks the outer structure and requires an integrity MAC.
