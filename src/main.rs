@@ -267,7 +267,7 @@ impl App {
                 content,
             );
         } else if self.keystore_path.is_some() {
-            let block = Block::bordered().title(" keystore-tui ");
+            let block = Block::bordered().title(" keystore-tui ".blue());
             if self.entries.is_empty() {
                 frame.render_widget(
                     Paragraph::new("This keystore contains no entries.").block(block),
@@ -317,7 +317,7 @@ impl App {
                 Paragraph::new(
                     "No keystore selected.\n\nPress o to open a .jks, .p12, or .pfx file.",
                 )
-                .block(Block::bordered().title(" keystore-tui ")),
+                .block(Block::bordered().title(" keystore-tui ".blue())),
                 content,
             );
         }

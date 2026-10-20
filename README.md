@@ -1,6 +1,7 @@
 # keystore-tui
 
 TUI for Java KeyStore and Java PKCS12 files, built with Rust and Ratatui.
+The app name at the top is displayed in blue.
 
 Open a `.jks`, `.p12`, or `.pfx` file with the built-in terminal file browser and
 list its entry aliases and types (private keys, trusted certificates, or PKCS12
