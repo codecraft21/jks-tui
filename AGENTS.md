@@ -22,8 +22,10 @@ This file covers how the code is organised and how to work on it.
 | `src/file_picker.rs` | The keystore file browser |
 | `src/keystore.rs` | JKS parsing and integrity check (SHA-1); the shared `KeystoreEntry` model |
 | `src/pkcs12.rs` | PKCS12 parsing, MAC verification, and decryption of safe contents (AES and legacy PBE) |
-| `src/certificate.rs` | X.509 summary (algorithm, key size, expiry) for the entry table |
+| `src/entry_list.rs` | Entry-list filtering, sorting, and expiry classification |
+| `src/certificate.rs` | X.509 summary (subject, algorithm, key size, expiry) for the entry table |
 | `src/certificate/details.rs` | Full certificate fields for the detail view |
+| `src/certificate/extensions.rs` | Decoding X.509 extensions into display lines |
 | `src/entry_details.rs` | The full-screen detail view and the certificate hierarchy |
 | `src/test_support.rs`, `src/tests.rs` | Unit-test helpers, synthetic keystores, and tests |
 | `tests/terminal_smoke.py` | PTY smoke tests against the built binary |
@@ -63,9 +65,12 @@ To test a build in another location, pass
 
 The smoke tests use a generated public-certificate fixture with an empty
 password. They exercise opening a keystore, detail navigation, scrolling,
-fingerprints, resizing, and returning to the list. They also check that both `q`
-and `Ctrl+C` restore terminal modes, leave the alternate screen, and show the
-cursor again.
+fingerprints, extensions, resizing, and returning to the list. They also build a
+three-entry store at runtime from copies of that certificate to exercise
+filtering (including `q` typed into the filter and `Esc` cancelling it) and
+sorting. They check that `q`, `Esc`, and `Ctrl+C` (including while typing a
+filter) restore terminal modes, leave the alternate screen, and show the cursor
+again.
 
 CI (`.github/workflows/rust.yml`) runs all of the above on Linux for every push
 to `main` and every pull request.

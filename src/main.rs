@@ -1,5 +1,6 @@
 mod certificate;
 mod entry_details;
+mod entry_list;
 mod file_picker;
 mod keystore;
 mod pkcs12;
@@ -22,9 +23,11 @@ use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     layout::{Constraint, Layout},
     style::{Color, Style, Stylize},
+    text::Line,
     widgets::{Block, Cell, Paragraph, Row, Table, TableState, Wrap},
 };
 
+use entry_list::{ExpiryStatus, SortOrder};
 use file_picker::FilePicker;
 use keystore::KeystoreEntry;
 use zeroize::{Zeroize, Zeroizing};
@@ -81,7 +84,14 @@ struct App {
     file_picker: Option<FilePicker>,
     password_prompt: Option<PasswordPrompt>,
     entries: Vec<KeystoreEntry>,
+    /// Indices into `entries` shown by the table, after filtering and sorting.
+    /// `entries_state` selects a position in this list.
+    visible: Vec<usize>,
     entries_state: TableState,
+    filter: String,
+    /// Whether keys are typed into the filter instead of acting as shortcuts.
+    editing_filter: bool,
+    sort: SortOrder,
     entry_details: Option<entry_details::EntryDetails>,
     error: Option<String>,
     incomplete_warning: bool,
@@ -119,7 +129,9 @@ impl App {
             return false;
         }
 
-        if (key.code == KeyCode::Char('q') && self.password_prompt.is_none())
+        if (key.code == KeyCode::Char('q')
+            && self.password_prompt.is_none()
+            && !self.editing_filter)
             || (key.code == KeyCode::Char('c')
                 && key.modifiers.contains(KeyModifiers::CONTROL)
                 && !key.modifiers.contains(KeyModifiers::ALT))
@@ -142,14 +154,12 @@ impl App {
             } else {
                 details.handle_key(key.code);
             }
+        } else if self.editing_filter {
+            self.handle_filter(key);
         } else {
             match key.code {
                 KeyCode::Enter => {
-                    if let Some(index) = self
-                        .entries_state
-                        .selected()
-                        .filter(|&index| index < self.entries.len())
-                    {
+                    if let Some(index) = self.selected_entry() {
                         self.entry_details = Some(entry_details::EntryDetails::new(
                             index,
                             &self.entries[index],
@@ -157,6 +167,11 @@ impl App {
                     }
                 }
                 KeyCode::Char('o') => self.open_picker(),
+                KeyCode::Char('/') if !self.entries.is_empty() => self.editing_filter = true,
+                KeyCode::Char('s') if !self.entries.is_empty() => {
+                    self.sort = self.sort.next();
+                    self.refresh_visible();
+                }
                 KeyCode::Esc => return true,
                 KeyCode::Down | KeyCode::Char('j') => self.entries_state.select_next(),
                 KeyCode::Up | KeyCode::Char('k') => self.entries_state.select_previous(),
@@ -165,6 +180,45 @@ impl App {
         }
 
         false
+    }
+
+    fn handle_filter(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.editing_filter = false;
+                self.filter.clear();
+            }
+            KeyCode::Enter => {
+                self.editing_filter = false;
+                return;
+            }
+            KeyCode::Backspace => {
+                self.filter.pop();
+            }
+            KeyCode::Char(ch) if is_text_input(key.modifiers) => self.filter.push(ch),
+            KeyCode::Down => return self.entries_state.select_next(),
+            KeyCode::Up => return self.entries_state.select_previous(),
+            _ => return,
+        }
+        self.refresh_visible();
+    }
+
+    /// The `entries` index of the selected row, if any row is shown.
+    fn selected_entry(&self) -> Option<usize> {
+        let last = self.visible.len().checked_sub(1)?;
+        let position = self.entries_state.selected()?.min(last);
+        Some(self.visible[position])
+    }
+
+    /// Re-applies the filter and sort, keeping the selected entry selected
+    /// when it is still shown, or else selecting the first shown entry.
+    fn refresh_visible(&mut self) {
+        let selected = self.selected_entry();
+        self.visible = entry_list::visible_entries(&self.entries, &self.filter, self.sort);
+        let position = selected
+            .and_then(|entry| self.visible.iter().position(|&index| index == entry))
+            .or((!self.visible.is_empty()).then_some(0));
+        self.entries_state.select(position);
     }
 
     fn handle_password(&mut self, key: KeyEvent) {
@@ -239,9 +293,13 @@ impl App {
 
     fn show_entries(&mut self, path: PathBuf, entries: Vec<KeystoreEntry>) {
         self.keystore_path = Some(path);
-        self.entries_state =
-            TableState::default().with_selected((!entries.is_empty()).then_some(0));
         self.entries = entries;
+        self.filter.clear();
+        self.editing_filter = false;
+        // The sort order is kept across keystores; the filter is not.
+        self.visible = entry_list::visible_entries(&self.entries, "", self.sort);
+        self.entries_state =
+            TableState::default().with_selected((!self.visible.is_empty()).then_some(0));
         self.entry_details = None;
         self.error = None;
         self.incomplete_warning = false;
@@ -295,19 +353,38 @@ impl App {
                 content,
             );
         } else if self.keystore_path.is_some() {
-            let block = Block::bordered().title(" keystore-tui ".blue());
+            let mut block = Block::bordered().title(" keystore-tui ".blue());
+            if !self.entries.is_empty() {
+                block = block.title_bottom(Line::from(self.list_title()).right_aligned());
+            }
             if self.entries.is_empty() {
                 frame.render_widget(
                     Paragraph::new("This keystore contains no entries.").block(block),
+                    content,
+                );
+            } else if self.visible.is_empty() {
+                let hint = if self.editing_filter {
+                    "Edit the filter with Backspace, or press Esc to clear it."
+                } else {
+                    "Press / to edit the filter, then Esc to clear it."
+                };
+                frame.render_widget(
+                    Paragraph::new(format!("No matching entries.\n\n{hint}"))
+                        .block(block)
+                        .wrap(Wrap { trim: false }),
                     content,
                 );
             } else {
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_or(0, |elapsed| elapsed.as_secs() as i64);
-                let selected = self.entries_state.selected();
-                let rows = self.entries.iter().enumerate().map(|(index, entry)| {
-                    let is_selected = selected == Some(index);
+                let selected = self
+                    .entries_state
+                    .selected()
+                    .map(|position| position.min(self.visible.len() - 1));
+                let rows = self.visible.iter().enumerate().map(|(position, &index)| {
+                    let entry = &self.entries[index];
+                    let is_selected = selected == Some(position);
                     let mut cells = vec![Cell::from(entry.alias.as_str()), Cell::from(entry.kind)];
                     match &entry.certificate {
                         Some(summary) => {
@@ -315,16 +392,16 @@ impl App {
                             cells.extend([
                                 Cell::from(summary.algorithm.as_str()),
                                 Cell::from(summary.key_size_text()),
-                                if summary.is_expired(now) {
-                                    if is_selected {
-                                        expiry
-                                            .fg(Color::Rgb(255, 255, 255))
-                                            .bg(Color::Rgb(128, 0, 0))
-                                    } else {
-                                        expiry.fg(Color::Red)
+                                match (entry_list::expiry_status(summary, now), is_selected) {
+                                    (ExpiryStatus::Expired, true) => expiry
+                                        .fg(Color::Rgb(255, 255, 255))
+                                        .bg(Color::Rgb(128, 0, 0)),
+                                    (ExpiryStatus::Expired, false) => expiry.fg(Color::Red),
+                                    (ExpiryStatus::ExpiringSoon, true) => {
+                                        expiry.fg(Color::Rgb(0, 0, 0)).bg(Color::Rgb(255, 175, 0))
                                     }
-                                } else {
-                                    expiry
+                                    (ExpiryStatus::ExpiringSoon, false) => expiry.fg(Color::Yellow),
+                                    (ExpiryStatus::Valid, _) => expiry,
                                 },
                             ]);
                         }
@@ -391,11 +468,27 @@ impl App {
         } else {
             let shortcuts = if self.password_prompt.is_some() {
                 "Enter Verify | Backspace Delete | Esc Cancel | Ctrl+C Quit"
+            } else if self.editing_filter {
+                "Type to filter | Enter Apply | Esc Clear | Up/Down Scroll | Ctrl+C Quit"
             } else {
-                "o Open keystore | Enter Details | Up/Down j/k Scroll | q / Esc / Ctrl+C Quit"
+                "o Open keystore | Enter Details | Up/Down j/k Scroll | / Filter | s Sort | q / Esc / Ctrl+C Quit"
             };
             frame.render_widget(Paragraph::new(shortcuts), help);
         }
+    }
+
+    /// Describes the filter, shown entry count, and sort order.
+    fn list_title(&self) -> String {
+        let total = self.entries.len();
+        let shown = self.visible.len();
+        let filter = if self.editing_filter {
+            format!("Filter: {}_ | {shown} of {total} entries | ", self.filter)
+        } else if self.filter.is_empty() {
+            format!("{total} entries | ")
+        } else {
+            format!("Filter: '{}' | {shown} of {total} entries | ", self.filter)
+        };
+        format!(" {filter}Sort: {} ", self.sort.label())
     }
 }
 

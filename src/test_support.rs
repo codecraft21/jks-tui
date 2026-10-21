@@ -26,6 +26,7 @@ pub fn fixture_certificate_der() -> &'static [u8] {
 /// What the entry list shows for the fixture certificate.
 pub fn fixture_summary() -> Summary {
     Summary {
+        subject: "CN=JKS TUI test fixture".into(),
         algorithm: "EC".into(),
         key_size: Some(256),
         not_after: Asn1Time::new(2036, 10, 9, 19, 48, 29, true).unwrap(),
