@@ -1,4 +1,5 @@
 pub mod details;
+pub mod extensions;
 
 use crown::{
     asn1::{Asn1Time, Reader, der::Class, oid},

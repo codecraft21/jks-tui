@@ -5,6 +5,8 @@ use crown::{
     x509::{algorithm::AlgorithmIdentifier, name::Name},
 };
 
+use super::extensions::{self, Extension, OID_AUTHORITY_KEY_ID, OID_SUBJECT_KEY_ID};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Details {
     pub version: i64,
@@ -15,6 +17,8 @@ pub struct Details {
     pub not_before: Asn1Time,
     pub not_after: Asn1Time,
     pub signature_algorithm: String,
+    /// In certificate order; empty when the certificate has none.
+    pub extensions: Vec<Extension>,
     subject_key_id: Option<Vec<u8>>,
     authority_key_id: Option<Vec<u8>>,
     authority_serial: Option<Vec<u8>>,
@@ -56,6 +60,7 @@ impl Details {
             not_before,
             not_after,
             signature_algorithm: signature_name(&AlgorithmIdentifier::parse(&mut certificate)?.oid),
+            extensions: Vec::new(),
             subject_key_id: None,
             authority_key_id: None,
             authority_serial: None,
@@ -68,19 +73,20 @@ impl Details {
                 let mut explicit = tbs.read_explicit(3)?;
                 let mut extensions = explicit.read_sequence()?;
                 while !extensions.is_empty() {
-                    let mut extension = extensions.read_sequence()?;
-                    let id = extension.read_oid()?;
-                    if extension.peek_tag()? == der::BOOLEAN {
-                        extension.read_boolean()?;
-                    }
-                    let value = extension.read_octet_string()?;
+                    // A malformed extension is described, not fatal to the other details.
+                    let extension = Extension::parse(extensions.read_raw_tlv()?);
                     // Optional linking hints must not make otherwise readable details disappear.
-                    if id.matches(&[2, 5, 29, 14]) {
-                        details.subject_key_id =
-                            Reader::new(value).read_octet_string().ok().map(Vec::from);
-                    } else if id.matches(&[2, 5, 29, 35]) {
-                        let _ = details.read_authority(value);
+                    if let Some(id) = &extension.oid {
+                        if id.matches(OID_SUBJECT_KEY_ID) {
+                            details.subject_key_id = Reader::new(&extension.value)
+                                .read_octet_string()
+                                .ok()
+                                .map(Vec::from);
+                        } else if id.matches(OID_AUTHORITY_KEY_ID) {
+                            let _ = details.read_authority(&extension.value);
+                        }
                     }
+                    details.extensions.push(extension);
                 }
             } else {
                 tbs.read_raw_tlv()?; // Optional issuer/subject unique identifiers.
@@ -121,20 +127,15 @@ pub fn time_text(time: &Asn1Time) -> String {
 }
 
 pub fn fingerprint(encoding: &[u8], sha1: bool) -> String {
-    let bytes = if sha1 {
-        crown::hash::sha1::sum(encoding).to_vec()
+    if sha1 {
+        extensions::hex(&crown::hash::sha1::sum(encoding))
     } else {
-        crown::hash::sha256::sum256(encoding).to_vec()
-    };
-    bytes
-        .iter()
-        .map(|byte| format!("{byte:02X}"))
-        .collect::<Vec<_>>()
-        .join(":")
+        extensions::hex(&crown::hash::sha256::sum256(encoding))
+    }
 }
 
 /// INTEGER content is signed two's complement and is not limited to machine integers.
-fn serial_text(bytes: &[u8], hex: bool) -> String {
+pub(super) fn serial_text(bytes: &[u8], hex: bool) -> String {
     let negative = bytes.first().is_some_and(|byte| byte & 0x80 != 0);
     let mut magnitude = bytes.to_vec();
     if negative {
@@ -291,6 +292,51 @@ mod tests {
         assert_eq!(info.signature_algorithm, "SHA-384 with ECDSA");
         assert!(info.serial_hex.starts_with("0x"));
         assert!(info.serial_decimal.chars().all(|ch| ch.is_ascii_digit()));
+    }
+
+    #[test]
+    fn lists_extensions_and_survives_undecodable_ones() {
+        let fixture = Details::parse(fixture_certificate_der()).unwrap();
+        assert_eq!(fixture.extensions.len(), 1);
+        assert_eq!(
+            fixture.extensions[0].title(),
+            "Subject Key Identifier (2.5.29.14)"
+        );
+        let none = Details::parse(&metadata_certificate("leaf", "issuer", &[1], &[])).unwrap();
+        assert!(none.extensions.is_empty());
+
+        let ski = extension(&[2, 5, 29, 14], &der::octet_string(&[7]));
+        let broken_key_usage = extension(&[2, 5, 29, 15], &[0xff]);
+        let malformed = der::sequence(&der::null());
+        let unknown = extension(&[1, 2, 3], &[0xab]);
+        let info = Details::parse(&metadata_certificate(
+            "leaf",
+            "issuer",
+            &[1],
+            &[ski, broken_key_usage, malformed, unknown],
+        ))
+        .unwrap();
+        let shown: Vec<_> = info
+            .extensions
+            .iter()
+            .map(|extension| (extension.title(), extension.lines.join("|")))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("Subject Key Identifier (2.5.29.14)".into(), "07".into()),
+                (
+                    "Key Usage (2.5.29.15)".into(),
+                    "Could not decode; value: FF".into()
+                ),
+                (
+                    "Malformed extension".into(),
+                    "Could not decode; encoding: 30:02:05:00".into()
+                ),
+                ("1.2.3".into(), "Value: AB".into()),
+            ]
+        );
+        assert_eq!(info.subject_key_id.as_deref(), Some(&[7][..]));
     }
 
     #[test]

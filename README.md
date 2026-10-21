@@ -92,6 +92,26 @@ once the certificate has expired. Long values wrap and can be scrolled.
 SHA-256 is the default fingerprint; SHA-1 is also available. Both hash the
 original certificate bytes.
 
+An “Extensions” section follows the fingerprint and scrolls with the other
+fields. Each extension is listed by name and OID, marked `[critical]` when flagged,
+with its decoded values indented below. Certificates without extensions show
+`Extensions: None`. These extensions are decoded:
+
+| Extension | Shows |
+| --- | --- |
+| Subject / Issuer Alternative Name | DNS names, IPv4/IPv6 addresses, emails, URIs, directory names, registered IDs; other name forms in hex |
+| Key Usage | Named usages (Digital Signature, Certificate Sign, ...) |
+| Extended Key Usage | `serverAuth`, `clientAuth`, `codeSigning`, `emailProtection`, `timeStamping`, `OCSPSigning`, `anyExtendedKeyUsage`; others as dotted OIDs |
+| Basic Constraints | CA flag and path length |
+| Subject / Authority Key Identifier | Key identifiers in hex; the authority's issuer names and serial when present |
+| CRL Distribution Points | Distribution point names (usually URIs) and CRL issuers |
+| Authority Information Access | OCSP and CA Issuers locations |
+| Certificate Policies | Policy OIDs, naming `anyPolicy` and CA/Browser Forum validation levels |
+
+Other extensions show their OID and value in hex. An extension that cannot be
+decoded shows `Could not decode` with its value in hex, without hiding the other
+fields or extensions. Control characters in decoded names are shown escaped.
+
 | Key | Action in the detail view |
 | --- | --- |
 | `Tab` / `Shift+Tab` | Switch focus between hierarchy and details |
@@ -108,7 +128,7 @@ certificates or verify trust. Entries without certificates still open with an
 explanation, and an unreadable certificate does not hide other chain members.
 Switching certificates resets detail scrolling. Small terminals show a resize
 hint when the panes cannot fit; back and quit shortcuts remain available. Import,
-export, extensions, PEM, ASN.1, and clipboard actions are not provided.
+export, PEM, raw ASN.1, and clipboard actions are not provided.
 
 The selected entry uses bold black text on a light cyan background, with explicit
 RGB colors for consistent contrast across terminal palettes, and a `>` marker.
@@ -160,8 +180,8 @@ python3 tests/terminal_smoke.py
 
 Use `--binary /absolute/path/to/keystore-tui` for a different build location.
 The tests use a generated public-certificate fixture with an empty password and
-exercise opening, detail navigation, scrolling, fingerprints, resizing, and
-returning to the list. They also build a three-entry store from copies of that
+exercise opening, detail navigation, scrolling, fingerprints, extensions, resizing,
+and returning to the list. They also build a three-entry store from copies of that
 public certificate to exercise filtering (including `q` typed into the filter and
 `Esc` cancelling it) and sorting. `q`, `Esc`, and `Ctrl+C` (including while
 typing a filter) must restore terminal modes, the alternate screen, and cursor
