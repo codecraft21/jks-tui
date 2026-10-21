@@ -48,15 +48,40 @@ these columns:
 | Type | Private key, Trusted certificate, or Secret key |
 | Algorithm | The certificate's public key algorithm (RSA, EC, DSA, Ed25519, ...) |
 | Key size | The key size in bits (RSA/DSA modulus, EC curve size) |
-| Expires | The certificate's expiry date (UTC), in red once it has passed |
+| Expires | The certificate's expiry date (UTC): yellow within 30 days of expiry, red once it has passed |
 
 For a private key, the certificate is the first one in its chain (for PKCS12, the
 certificate sharing the key's local key ID). Secret keys, and certificates that
 cannot be read, show `-` in these columns. Unrecognized algorithms show their
-OID. Use `Up` / `Down` or `j` / `k`
-to scroll the entries, `Enter` to inspect the selected entry, or `o` to open
-another file. Cancelling the browser or the password prompt keeps the previously
-loaded keystore.
+OID. Cancelling the browser or the password prompt keeps the previously loaded
+keystore.
+
+| Key | Action in the entry list |
+| --- | --- |
+| `Up` / `Down` or `k` / `j` | Move the selection |
+| `Enter` | Inspect the selected entry |
+| `/` | Type a filter |
+| `s` | Cycle the sort order between alias and expiry date |
+| `o` | Open another keystore |
+| `q` / `Esc` / `Ctrl+C` | Quit |
+
+Press `/` to filter the entries by a case-insensitive substring of the alias or
+of the certificate subject (such as `CN=example`). The list updates as you type,
+and every letter, including `q`, `s`, `j`, and `k`, is typed into the filter;
+`Up` / `Down` still move the selection. `Backspace` deletes a character, `Enter`
+applies the filter and returns to the list, and `Esc` clears the filter and
+returns to the list. To clear an applied filter, press `/` (which resumes editing
+it) and then `Esc`. `Ctrl+C` quits even while typing; once the filter is applied,
+`q` and `Esc` quit as usual. When nothing matches, the list shows
+“No matching entries.” Opening another keystore clears the filter.
+
+Press `s` to sort by expiry date, soonest first, with entries that have no
+expiry date last; press it again to return to the default alias order. Entries
+with equal dates keep their alias order. The sort order is kept when another
+keystore is opened. The table's bottom border shows the entry count, the
+filter with how many entries match (for example `Filter: 'web' | 2 of 9 entries`),
+and the sort order. Filtering and sorting keep the same entry selected while it
+remains in the list; otherwise the first listed entry is selected.
 
 Press `Enter` on an entry to open its full-screen, read-only detail view. A
 selectable certificate hierarchy appears above the certificate fields, starting
@@ -88,7 +113,9 @@ export, extensions, PEM, ASN.1, and clipboard actions are not provided.
 The selected entry uses bold black text on a light cyan background, with explicit
 RGB colors for consistent contrast across terminal palettes, and a `>` marker.
 Expired dates on the selected row use bold white text on a dark red background
-for contrast; unselected expired dates stay red.
+for contrast; unselected expired dates stay red. Dates expiring within 30 days
+use bold black text on an amber background on the selected row and are yellow
+otherwise.
 
 The app checks the JKS header, lengths, counts, and structure before asking for a
 password. For PKCS12, it checks the outer structure and requires an integrity MAC.
@@ -99,7 +126,7 @@ a persistent warning that the list is incomplete. Files larger than 64 MiB are
 refused. As in Java, data after the JKS integrity digest is ignored, private-key
 entries are listed whatever the length of their encrypted key, and only X.509
 certificates are accepted. Every entry is
-listed, even when several share an alias, sorted by alias. An alias containing an
+listed, even when several share an alias, sorted by alias by default. An alias containing an
 unpaired UTF-16 surrogate (which Java allows) shows it as an escape such as
 `\uD83D`. Invalid files, unreadable files, and failed integrity checks produce a
 red error in the TUI. JKS Unicode passwords and aliases (including supplementary
@@ -108,7 +135,8 @@ Private keys are neither decrypted nor displayed. The app runs without
 Java or `keytool` installed. PKCS12 compatibility targets Java-generated stores.
 
 Press `q` to quit from the browser, main view, or detail view, `Esc` to quit from
-the main view, or `Ctrl+C` to quit from any view (including the password prompt).
+the main view, or `Ctrl+C` to quit from any view (including the password prompt
+and while typing a filter, when `q` and `Esc` edit the filter instead).
 The app restores the terminal when it exits.
 
 ## Development
@@ -133,5 +161,8 @@ python3 tests/terminal_smoke.py
 Use `--binary /absolute/path/to/keystore-tui` for a different build location.
 The tests use a generated public-certificate fixture with an empty password and
 exercise opening, detail navigation, scrolling, fingerprints, resizing, and
-returning to the list. Both `q` and `Ctrl+C` must restore terminal modes, the
-alternate screen, and cursor visibility. The Linux CI job runs these checks too.
+returning to the list. They also build a three-entry store from copies of that
+public certificate to exercise filtering (including `q` typed into the filter and
+`Esc` cancelling it) and sorting. `q`, `Esc`, and `Ctrl+C` (including while
+typing a filter) must restore terminal modes, the alternate screen, and cursor
+visibility. The Linux CI job runs these checks too.

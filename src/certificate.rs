@@ -1,10 +1,15 @@
 pub mod details;
 
-use crown::asn1::{Asn1Time, Reader, der::Class, oid};
+use crown::{
+    asn1::{Asn1Time, Reader, der::Class, oid},
+    x509::name::Name,
+};
 
-/// The public key and expiry of an X.509 certificate, for display only.
+/// The subject, public key and expiry of an X.509 certificate, for display only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Summary {
+    /// The subject distinguished name, or empty when it cannot be decoded.
+    pub subject: String,
     pub algorithm: String,
     /// `None` when the size is unknown or not meaningful for the algorithm.
     pub key_size: Option<u32>,
@@ -48,7 +53,7 @@ pub fn summarize(der: &[u8]) -> Option<Summary> {
     let mut validity = tbs.read_sequence().ok()?;
     validity.read_time().ok()?;
     let not_after = validity.read_time().ok()?;
-    tbs.read_raw_tlv().ok()?; // Subject.
+    let subject = tbs.read_raw_tlv().ok()?;
     let mut spki = tbs.read_sequence().ok()?;
     let mut algorithm = spki.read_sequence().ok()?;
     let id = algorithm.read_oid().ok()?;
@@ -103,6 +108,10 @@ pub fn summarize(der: &[u8]) -> Option<Summary> {
         )
     };
     Some(Summary {
+        // Unusual names must not hide the entry, so decode failures leave it empty.
+        subject: Name::parse(&mut Reader::new(subject))
+            .map(|name| name.to_string())
+            .unwrap_or_default(),
         algorithm: name,
         key_size,
         not_after,

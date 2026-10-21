@@ -221,6 +221,87 @@ class TerminalSmoke(unittest.TestCase):
     def test_ctrl_c_restores_terminal(self):
         self.exercise(b"\x03")
 
+    def triage(self, quit_while_typing, exit_key):
+        with tempfile.TemporaryDirectory(prefix="terminal-check-", dir=ROOT / "target") as directory:
+            Path(directory, "triage.jks").write_bytes(triage_keystore())
+            with PtyApp(self.binary, directory) as app:
+                app.expect("No keystore selected")
+                app.send(b"o")
+                app.expect("triage.jks")
+                app.send(b"\x1b[B")  # Skip the parent-directory row.
+                app.send(b"\r")
+                app.expect("alpha", "beta-quit", "zeta-soon", "3 entries | Sort: alias")
+                app.send(b"/")
+                app.expect("Type to filter", "Filter: _ | 3 of 3 entries")
+                app.send(b"q")  # Typed into the filter, not a quit.
+                app.expect("Filter: q_ | 1 of 3 entries", "beta-quit")
+                self.assertIsNone(app.process.poll())
+                self.assertNotIn("alpha", app.screen())
+                app.send(b"x")
+                app.expect("Filter: qx_ | 0 of 3 entries", "No matching entries")
+                app.send(b"\x1b")  # Cancels and clears the filter.
+                app.expect("3 entries | Sort: alias", "alpha", "Up/Down j/k Scroll")
+                self.assertNotIn("Filter:", app.screen())
+                app.send(b"/zeta\r")
+                app.expect("Filter: 'zeta' | 1 of 3 entries")
+                self.assertNotIn("alpha", app.screen())
+                app.send(b"\r")  # Details open for the filtered selection.
+                app.expect("Certificate hierarchy", "zeta-soon")
+                app.send(b"\x1b")
+                app.expect("Filter: 'zeta' | 1 of 3 entries")
+                app.send(b"/")
+                app.expect("Filter: zeta_")
+                app.send(b"\x1b")
+                app.expect("3 entries | Sort: alias", "alpha")
+                screen = app.screen()
+                self.assertLess(screen.index("alpha"), screen.index("zeta-soon"))
+                app.send(b"s")
+                app.expect("3 entries | Sort: expiry")
+                screen = app.screen()
+                self.assertLess(screen.index("zeta-soon"), screen.index("alpha"))
+                app.send(b"s")
+                app.expect("3 entries | Sort: alias")
+                app.send(b"/a\r")
+                app.expect("Filter: 'a' | 3 of 3 entries")
+                if quit_while_typing:
+                    app.send(b"/")
+                    app.expect("Filter: a_")
+                app.send(exit_key)
+                app.assert_restored(self)
+
+    def test_filter_and_sort_then_quit_restores_terminal(self):
+        self.triage(False, b"q")
+
+    def test_filter_and_sort_then_escape_restores_terminal(self):
+        self.triage(False, b"\x1b")
+
+    def test_ctrl_c_while_filtering_restores_terminal(self):
+        self.triage(True, b"\x03")
+
+
+def triage_keystore():
+    """Build an empty-password JKS with three copies of the public fixture
+    certificate. One copy's notAfter is moved earlier to exercise sorting;
+    certificate signatures are never checked by the app."""
+    data = (ROOT / "tests/fixtures/trusted-cert.jks").read_bytes()
+    offset = 12 + 4 + 2 + len(b"root-cert") + 8 + 2 + len(b"X.509")
+    length = struct.unpack(">I", data[offset : offset + 4])[0]
+    certificate = data[offset + 4 : offset + 4 + length]
+    not_after = b"361009194829Z"
+    assert certificate.count(not_after) == 1, "unexpected fixture expiry"
+    earlier = certificate.replace(not_after, b"301009194829Z")
+
+    def utf(text):
+        encoded = text.encode()
+        return struct.pack(">H", len(encoded)) + encoded
+
+    entries = [("alpha", certificate), ("beta-quit", certificate), ("zeta-soon", earlier)]
+    body = struct.pack(">III", 0xFEEDFEED, 2, len(entries))
+    for alias, der in entries:
+        body += struct.pack(">I", 2) + utf(alias) + struct.pack(">Q", 0)
+        body += utf("X.509") + struct.pack(">I", len(der)) + der
+    return body + hashlib.sha1(b"Mighty Aphrodite" + body).digest()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
