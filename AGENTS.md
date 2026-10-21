@@ -5,6 +5,15 @@ PKCS12 keystores. [`README.md`](README.md) describes the app from the user's
 point of view. [`docs/SPEC.md`](docs/SPEC.md) specifies its detailed behaviour.
 This file covers how the code is organised and how to work on it.
 
+## Contents
+
+- [Architecture](#architecture)
+- [Development](#development)
+  - [Fixtures](#fixtures)
+- [Conventions and constraints](#conventions-and-constraints)
+- [Documentation](#documentation)
+- [Workflow](#workflow)
+
 ## Architecture
 
 | Module | Responsibility |

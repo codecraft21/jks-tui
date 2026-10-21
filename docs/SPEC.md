@@ -4,6 +4,21 @@ This document is the reference for how keystore-tui behaves. The key bindings
 are listed in [`README.md`](../README.md). When behaviour changes, update this
 document, and also the README if users will notice.
 
+## Contents
+
+- [Scope](#scope)
+- [File selection](#file-selection)
+- [Loading and validation](#loading-and-validation)
+  - [JKS compatibility (matching Java)](#jks-compatibility-matching-java)
+  - [PKCS12 compatibility](#pkcs12-compatibility)
+- [Password prompt](#password-prompt)
+- [Entry list](#entry-list)
+- [Entry details](#entry-details)
+  - [Certificate hierarchy](#certificate-hierarchy)
+  - [Small terminals](#small-terminals)
+- [Visual style](#visual-style)
+- [Quitting and terminal restoration](#quitting-and-terminal-restoration)
+
 ## Scope
 
 - The app reads Java KeyStore (JKS) and Java-generated PKCS12 files. It never
