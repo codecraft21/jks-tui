@@ -13,6 +13,7 @@ This file covers how the code is organised and how to work on it.
 - [Conventions and constraints](#conventions-and-constraints)
 - [Documentation](#documentation)
 - [Workflow](#workflow)
+  - [Publishing](#publishing)
 
 ## Architecture
 
@@ -111,3 +112,22 @@ runtime from synthetic bytes, so no private key is ever committed.
   Publishing must not require Git credentials in the workspace.
 - When reporting back, say what changed, which checks ran, and any unresolved
   failures.
+
+### Publishing
+
+When the user says "publish", carry out all of these steps without asking for
+confirmation:
+
+1. Run the checks from [Development](#development) locally and fix any
+   failures.
+2. Commit the work to a feature branch, never directly to `main`, and publish
+   that branch.
+3. Open a pull request against `main`. Describe what changed and which checks
+   ran.
+4. Wait for the pull request's CI checks to finish.
+   - If they all pass, merge the pull request.
+   - If any fail, do not merge. Fix the failure and push again, or report what
+     is failing and why.
+5. After the merge, bring the local workspace up to date: switch to `main`,
+   pull the merged result, and delete the local feature branch.
+6. Report the pull request link, the check results, and whether it was merged.
