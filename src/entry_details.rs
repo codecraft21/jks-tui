@@ -18,6 +18,22 @@ use crate::{
     keystore::KeystoreEntry,
 };
 
+/// An indented section; each extension's title is followed by its decoded values.
+fn extensions_text(info: &Details) -> String {
+    if info.extensions.is_empty() {
+        return "Extensions: None\n\n".into();
+    }
+    let mut text = String::from("Extensions:\n");
+    for extension in &info.extensions {
+        text.push_str(&format!("  {}\n", extension.title()));
+        for line in &extension.lines {
+            text.push_str(&format!("    {line}\n"));
+        }
+    }
+    text.push('\n');
+    text
+}
+
 pub struct EntryDetails {
     pub entry: usize,
     hierarchy: TableState,
@@ -124,10 +140,14 @@ impl EntryDetails {
             text.push_str("Certificate could not be decoded.\n\n");
         }
         text.push_str(&format!(
-            "Fingerprint ({}): {}\n\nStored certificates only; trust is not verified.",
+            "Fingerprint ({}): {}\n\n",
             if self.sha1 { "SHA-1" } else { "SHA-256" },
             fingerprint(&entry.certificates[index], self.sha1)
         ));
+        if let Some(info) = &self.metadata[index] {
+            text.push_str(&extensions_text(info));
+        }
+        text.push_str("Stored certificates only; trust is not verified.");
         if entry.chain_warning.is_none()
             && self
                 .metadata
@@ -244,6 +264,7 @@ impl EntryDetails {
 mod tests {
     use super::*;
     use crate::test_support::metadata_certificate;
+    use crown::asn1::{der, oid::ObjectIdentifier};
     use ratatui::{Terminal, backend::TestBackend};
 
     fn entry(certificates: Vec<Vec<u8>>) -> KeystoreEntry {
@@ -351,6 +372,30 @@ mod tests {
         assert_eq!(view.scroll, view.max_scroll);
         draw(&mut view, &data, 160, 100);
         assert_eq!(view.scroll, 0);
+    }
+
+    #[test]
+    fn extensions_section_follows_fields_and_marks_critical() {
+        let critical_ca = der::sequence(
+            &[
+                der::oid(&ObjectIdentifier::new(&[2, 5, 29, 19]).unwrap()),
+                der::boolean(true),
+                der::octet_string(&der::sequence(&der::boolean(true))),
+            ]
+            .concat(),
+        );
+        let data = entry(vec![
+            metadata_certificate("leaf", "root", &[1], &[critical_ca]),
+            metadata_certificate("root", "root", &[2], &[]),
+        ]);
+        let mut view = EntryDetails::new(0, &data);
+        let text = view.text(&data, 0).to_string();
+        let fingerprint = text.find("Fingerprint (SHA-256)").unwrap();
+        let section = text.find("Extensions:\n  Basic Constraints (2.5.29.19) [critical]\n    CA: true, path length: unlimited\n").unwrap();
+        assert!(fingerprint < section);
+        assert!(section < text.find("trust is not verified").unwrap());
+        view.handle_key(KeyCode::Up);
+        assert!(view.text(&data, 0).to_string().contains("Extensions: None"));
     }
 
     #[test]
