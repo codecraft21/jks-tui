@@ -294,13 +294,15 @@ class TerminalSmoke(unittest.TestCase):
                 app.send(b"\r")
                 app.expect("Certificate hierarchy", "x Export certificate")
                 app.send(b"x")
-                app.expect("Save certificate to:", "JKS_TUI_test_fixture.pem_")
+                app.expect("Save certificate to:")
+                app.send(b"\x15")  # Ctrl+U clears the suggested absolute path.
+                app.expect("Save certificate to: _")
                 app.send(b"q")  # Typed into the name, not a quit.
-                app.expect("JKS_TUI_test_fixture.pemq_")
+                app.expect("Save certificate to: q_")
                 self.assertIsNone(app.process.poll())
-                app.send(b"\x7f\r")  # Backspace, then save.
+                app.send(b"x\x7f.pem\r")  # Backspace, then save next to the file.
                 app.expect("Saved certificate to")
-                saved = Path(directory, "JKS_TUI_test_fixture.pem")
+                saved = Path(directory, "q.pem")
                 self.assertEqual(saved.read_text(), pem)
                 app.send(b"X")
                 app.expect("Save chain to:")
