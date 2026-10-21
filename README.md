@@ -62,7 +62,8 @@ Press `Enter` on an entry to open its full-screen, read-only detail view. A
 selectable certificate hierarchy appears above the certificate fields, starting
 with the leaf selected. The fields show version, subject, issuer, serial number
 in hexadecimal and decimal, validity timestamps in UTC, public key algorithm and
-size, signature algorithm, and fingerprint. Long values wrap and can be scrolled.
+size, signature algorithm, and fingerprint. The “Valid Until” timestamp is red
+once the certificate has expired. Long values wrap and can be scrolled.
 SHA-256 is the default fingerprint; SHA-1 is also available. Both hash the
 original certificate bytes.
 
