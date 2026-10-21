@@ -42,6 +42,9 @@ pub struct KeystoreEntry {
     pub kind: &'static str,
     /// The entry's certificate, or the first of a private key's chain.
     pub certificate: Option<Summary>,
+    /// Original DER in leaf-first stored order, including unreadable certificates.
+    pub certificates: Vec<Vec<u8>>,
+    pub chain_warning: Option<&'static str>,
 }
 
 /// A structurally valid keystore whose integrity digest has not been checked.
@@ -79,6 +82,7 @@ pub fn parse(mut data: Vec<u8>) -> Result<Keystore, Error> {
         let tag = reader.u32()?;
         let alias = reader.string()?;
         reader.take(8)?; // Creation timestamp; listing does not need it.
+        let mut certificates = Vec::new();
         let (kind, certificate) = match tag {
             PRIVATE_KEY_TAG => {
                 // Encrypted key bytes remain opaque. Like Java, accept any
@@ -88,6 +92,7 @@ pub fn parse(mut data: Vec<u8>) -> Result<Keystore, Error> {
                 let mut leaf = None;
                 for index in 0..cert_count {
                     let encoding = reader.certificate(version)?;
+                    certificates.push(encoding.to_vec());
                     if index == 0 {
                         leaf = certificate::summarize(encoding);
                     }
@@ -96,6 +101,7 @@ pub fn parse(mut data: Vec<u8>) -> Result<Keystore, Error> {
             }
             TRUSTED_CERT_TAG => {
                 let encoding = reader.certificate(version)?;
+                certificates.push(encoding.to_vec());
                 ("Trusted certificate", certificate::summarize(encoding))
             }
             _ => return Err(Error::UnknownEntryTag(tag)),
@@ -104,6 +110,8 @@ pub fn parse(mut data: Vec<u8>) -> Result<Keystore, Error> {
             alias,
             kind,
             certificate,
+            certificates,
+            chain_warning: None,
         });
     }
     let body_len = data.len() - reader.remaining.len();
@@ -259,6 +267,8 @@ mod tests {
             alias: alias.into(),
             kind: "Private key",
             certificate: None,
+            certificates: vec![b"opaque synthetic certificate".to_vec()],
+            chain_warning: None,
         }
     }
 
@@ -267,12 +277,15 @@ mod tests {
             alias: alias.into(),
             kind: "Trusted certificate",
             certificate: None,
+            certificates: vec![b"opaque synthetic certificate".to_vec()],
+            chain_warning: None,
         }
     }
 
     fn fixture_cert(alias: &str) -> KeystoreEntry {
         KeystoreEntry {
             certificate: Some(fixture_summary()),
+            certificates: vec![fixture_certificate_der().to_vec()],
             ..cert(alias)
         }
     }
@@ -290,6 +303,10 @@ mod tests {
             load_entries(&data.finish(""), "").unwrap(),
             [KeystoreEntry {
                 certificate: Some(fixture_summary()),
+                certificates: vec![
+                    fixture_certificate_der().to_vec(),
+                    b"opaque synthetic certificate".to_vec()
+                ],
                 ..key("key")
             }]
         );
@@ -412,7 +429,13 @@ mod tests {
     fn lists_private_keys_without_a_certificate_chain() {
         let mut builder = Builder::new(VERSION_02, 1);
         builder.entry(PRIVATE_KEY_TAG, b"key", VERSION_02, 0);
-        assert_eq!(load_entries(&builder.finish(""), "").unwrap(), [key("key")]);
+        assert_eq!(
+            load_entries(&builder.finish(""), "").unwrap(),
+            [KeystoreEntry {
+                certificates: vec![],
+                ..key("key")
+            }]
+        );
     }
 
     #[test]

@@ -5,6 +5,7 @@ use crown::{
     pkcs12::{Bag, Pfx, SafeBag},
     x509::{
         algorithm::AlgorithmIdentifier,
+        attribute::parse_attributes,
         pbe::{LegacyPbe, Pbes2},
     },
 };
@@ -119,18 +120,29 @@ impl Store {
                 if let Some(alias) = bag.friendly_name() {
                     // Java gives the key and its end-entity certificate the
                     // same local key ID.
-                    let certificate = bag.local_key_id().and_then(|id| {
-                        bags.iter().find_map(|other| match &other.bag {
-                            Bag::Cert(cert) if other.local_key_id().as_ref() == Some(&id) => {
-                                certificate::summarize(&cert.encode())
-                            }
-                            _ => None,
+                    let leaf = bag
+                        .local_key_id()
+                        .and_then(|id| {
+                            bags.iter().find(|other| {
+                                other.certificate_der.is_some()
+                                    && other.local_key_id().as_ref() == Some(&id)
+                            })
                         })
-                    });
+                        .and_then(|bag| bag.certificate_der.as_deref());
+                    let pool: Vec<_> = bags
+                        .iter()
+                        .filter_map(|bag| bag.certificate_der.as_deref())
+                        .collect();
+                    let (certificates, chain_warning) = leaf.map_or_else(
+                        || (vec![], None),
+                        |leaf| certificate::details::chain(leaf, &pool),
+                    );
                     entries.push(KeystoreEntry {
                         alias,
                         kind: "Private key",
-                        certificate,
+                        certificate: leaf.and_then(certificate::summarize),
+                        certificates,
+                        chain_warning,
                     });
                 } else {
                     incomplete = true;
@@ -145,12 +157,14 @@ impl Store {
                             alias,
                             kind: "Secret key",
                             certificate: None,
+                            certificates: vec![],
+                            chain_warning: None,
                         });
                     } else {
                         incomplete = true;
                     }
                 }
-                Bag::Cert(cert) => {
+                _ if bag.certificate_der.is_some() => {
                     // Java identifies trusted entries with its trustedKeyUsage attribute.
                     if !bag
                         .attributes
@@ -164,10 +178,19 @@ impl Store {
                             .iter()
                             .any(|entry| entry.alias.eq_ignore_ascii_case(&alias))
                         {
+                            let der = bag.certificate_der.as_deref().unwrap();
+                            let pool: Vec<_> = bags
+                                .iter()
+                                .filter_map(|bag| bag.certificate_der.as_deref())
+                                .collect();
+                            let (certificates, chain_warning) =
+                                certificate::details::chain(der, &pool);
                             entries.push(KeystoreEntry {
                                 alias,
                                 kind: "Trusted certificate",
-                                certificate: certificate::summarize(&cert.encode()),
+                                certificate: certificate::summarize(der),
+                                certificates,
+                                chain_warning,
                             });
                         }
                     } else {
@@ -186,7 +209,19 @@ impl Store {
     }
 }
 
-fn parse_metadata_bag(raw: &[u8]) -> Result<Option<SafeBag>, CryptoError> {
+struct MetadataBag {
+    metadata: SafeBag,
+    certificate_der: Option<Vec<u8>>,
+}
+
+impl std::ops::Deref for MetadataBag {
+    type Target = SafeBag;
+    fn deref(&self) -> &Self::Target {
+        &self.metadata
+    }
+}
+
+fn parse_metadata_bag(raw: &[u8]) -> Result<Option<MetadataBag>, CryptoError> {
     let mut reader = Reader::new(raw);
     let mut bag = reader.read_sequence()?;
     let id = bag.read_oid()?;
@@ -194,10 +229,44 @@ fn parse_metadata_bag(raw: &[u8]) -> Result<Option<SafeBag>, CryptoError> {
     if id.matches(oid::OID_PKCS12_KEY_BAG) || id.matches(oid::OID_PKCS12_SAFE_CONTENTS_BAG) {
         return Ok(None);
     }
+    // Keep original DER and bag attributes even when a certificate or its
+    // public-key algorithm cannot be decoded by crown. Keys stay opaque.
+    if id.matches(oid::OID_PKCS12_CERT_BAG) {
+        let mut value = bag.read_explicit(0)?;
+        let mut cert_bag = value.read_sequence()?;
+        if !cert_bag.read_oid()?.matches(oid::OID_X509_CERTIFICATE) {
+            return Ok(None);
+        }
+        let mut cert_value = cert_bag.read_explicit(0)?;
+        let certificate_der = cert_value.read_octet_string_owned()?;
+        cert_value.expect_end()?;
+        cert_bag.expect_end()?;
+        value.expect_end()?;
+        let attributes = if bag.is_empty() {
+            vec![]
+        } else {
+            parse_attributes(&mut bag)?
+        };
+        bag.expect_end()?;
+        reader.expect_end()?;
+        return Ok(Some(MetadataBag {
+            metadata: SafeBag {
+                bag: Bag::Other {
+                    oid: id,
+                    value: vec![],
+                },
+                attributes,
+            },
+            certificate_der: Some(certificate_der),
+        }));
+    }
     let mut reader = Reader::new(raw);
     let bag = SafeBag::parse(&mut reader)?;
     reader.expect_end()?;
-    Ok(Some(bag))
+    Ok(Some(MetadataBag {
+        metadata: bag,
+        certificate_der: None,
+    }))
 }
 
 fn decrypt_safe(content: &[u8], password: &[u8]) -> Result<Vec<u8>, CryptoError> {
@@ -275,6 +344,8 @@ mod tests {
                     alias: "root-cert".into(),
                     kind: "Trusted certificate",
                     certificate: Some(fixture_summary()),
+                    certificates: vec![fixture_certificate_der().to_vec()],
+                    chain_warning: None,
                 }]
             );
             assert!(!verified.incomplete);
@@ -329,11 +400,15 @@ mod tests {
                     alias: "private".into(),
                     kind: "Private key",
                     certificate: None,
+                    certificates: vec![],
+                    chain_warning: None,
                 },
                 KeystoreEntry {
                     alias: "secret".into(),
                     kind: "Secret key",
                     certificate: None,
+                    certificates: vec![],
+                    chain_warning: None,
                 },
             ]
         );
@@ -441,9 +516,91 @@ mod tests {
                     alias: "root-cert".into(),
                     kind: "Trusted certificate",
                     certificate: Some(fixture_summary()),
+                    certificates: vec![fixture_certificate_der().to_vec()],
+                    chain_warning: None,
                 }]
             );
             assert!(!verified.incomplete);
         }
+    }
+    fn raw_certificate(der: &[u8], attributes: Vec<crown::x509::attribute::Attribute>) -> SafeBag {
+        SafeBag {
+            bag: Bag::Other {
+                oid: ObjectIdentifier::new(oid::OID_PKCS12_CERT_BAG).unwrap(),
+                value: der::sequence(
+                    &[
+                        der::oid(&ObjectIdentifier::new(oid::OID_X509_CERTIFICATE).unwrap()),
+                        der::explicit(0, &der::octet_string(der)),
+                    ]
+                    .concat(),
+                ),
+            },
+            attributes,
+        }
+    }
+
+    #[test]
+    fn retains_exact_certificates_and_builds_key_chains_from_unnamed_ca_bags() {
+        use crate::test_support::metadata_certificate;
+        let leaf = metadata_certificate("leaf", "intermediate", &[0, 0, 1], &[]);
+        let intermediate = metadata_certificate("intermediate", "root", &[2], &[]);
+        let root = metadata_certificate("root", "root", &[3], &[]);
+        let unrelated = metadata_certificate("other", "other", &[4], &[]);
+        let key = SafeBag {
+            bag: Bag::ShroudedKey(EncryptedPrivateKeyInfo {
+                algorithm: AlgorithmIdentifier::with_null(
+                    ObjectIdentifier::new(oid::OID_PBES2).unwrap(),
+                ),
+                encrypted_data: vec![1, 2, 3],
+            }),
+            attributes: vec![friendly_name("key"), local_key_id(&[1])],
+        };
+        let data = synthetic(vec![
+            key,
+            raw_certificate(&root, vec![]),
+            raw_certificate(&unrelated, vec![]),
+            raw_certificate(&leaf, vec![local_key_id(&[1])]),
+            raw_certificate(&intermediate, vec![]),
+            raw_certificate(&root, vec![]),
+        ]);
+        let verified = parse(&data).unwrap().verify("changeit").unwrap();
+        assert!(!verified.incomplete);
+        assert_eq!(verified.entries.len(), 1);
+        assert_eq!(verified.entries[0].certificates, [leaf, intermediate, root]);
+        assert_eq!(verified.entries[0].chain_warning, None);
+    }
+
+    #[test]
+    fn malformed_and_negative_serial_certificates_remain_inspectable() {
+        use crate::test_support::metadata_certificate;
+        use crown::x509::attribute::Attribute;
+        let negative = metadata_certificate("negative", "negative", &[0xff], &[]);
+        let trusted = |name| {
+            vec![
+                friendly_name(name),
+                Attribute::new(
+                    ObjectIdentifier::new(TRUSTED_KEY_USAGE).unwrap(),
+                    vec![der::oid(
+                        &ObjectIdentifier::new(&[2, 5, 29, 37, 0]).unwrap(),
+                    )],
+                ),
+            ]
+        };
+        let data = synthetic(vec![
+            raw_certificate(b"unreadable", trusted("malformed")),
+            raw_certificate(&negative, trusted("negative")),
+        ]);
+        let verified = parse(&data).unwrap().verify("changeit").unwrap();
+        assert!(!verified.incomplete);
+        assert_eq!(verified.entries.len(), 2);
+        assert_eq!(verified.entries[0].certificates, [b"unreadable".to_vec()]);
+        assert!(verified.entries[0].certificate.is_none());
+        assert_eq!(verified.entries[1].certificates, [negative]);
+        assert_eq!(
+            certificate::details::Details::parse(&verified.entries[1].certificates[0])
+                .unwrap()
+                .serial_decimal,
+            "-1"
+        );
     }
 }

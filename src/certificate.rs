@@ -1,3 +1,5 @@
+pub mod details;
+
 use crown::asn1::{Asn1Time, Reader, der::Class, oid};
 
 /// The public key and expiry of an X.509 certificate, for display only.

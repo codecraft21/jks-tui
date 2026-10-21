@@ -1,4 +1,5 @@
 mod certificate;
+mod entry_details;
 mod file_picker;
 mod keystore;
 mod pkcs12;
@@ -81,6 +82,7 @@ struct App {
     password_prompt: Option<PasswordPrompt>,
     entries: Vec<KeystoreEntry>,
     entries_state: TableState,
+    entry_details: Option<entry_details::EntryDetails>,
     error: Option<String>,
     incomplete_warning: bool,
 }
@@ -134,8 +136,26 @@ impl App {
                 self.file_picker = None;
                 self.open_file(path);
             }
+        } else if let Some(details) = &mut self.entry_details {
+            if key.code == KeyCode::Esc {
+                self.entry_details = None;
+            } else {
+                details.handle_key(key.code);
+            }
         } else {
             match key.code {
+                KeyCode::Enter => {
+                    if let Some(index) = self
+                        .entries_state
+                        .selected()
+                        .filter(|&index| index < self.entries.len())
+                    {
+                        self.entry_details = Some(entry_details::EntryDetails::new(
+                            index,
+                            &self.entries[index],
+                        ));
+                    }
+                }
                 KeyCode::Char('o') => self.open_picker(),
                 KeyCode::Esc => return true,
                 KeyCode::Down | KeyCode::Char('j') => self.entries_state.select_next(),
@@ -222,6 +242,7 @@ impl App {
         self.entries_state =
             TableState::default().with_selected((!entries.is_empty()).then_some(0));
         self.entries = entries;
+        self.entry_details = None;
         self.error = None;
         self.incomplete_warning = false;
     }
@@ -248,6 +269,13 @@ impl App {
     }
 
     fn draw(&mut self, frame: &mut Frame) {
+        if self.password_prompt.is_none()
+            && self.file_picker.is_none()
+            && let Some(details) = &mut self.entry_details
+        {
+            details.draw(frame, &self.entries[details.entry]);
+            return;
+        }
         let [content, status, path_bar, help] = Layout::vertical([
             Constraint::Min(3),
             Constraint::Length(2),
@@ -364,7 +392,7 @@ impl App {
             let shortcuts = if self.password_prompt.is_some() {
                 "Enter Verify | Backspace Delete | Esc Cancel | Ctrl+C Quit"
             } else {
-                "o Open keystore | Up/Down or j/k Scroll | q / Esc / Ctrl+C Quit"
+                "o Open keystore | Enter Details | Up/Down j/k Scroll | q / Esc / Ctrl+C Quit"
             };
             frame.render_widget(Paragraph::new(shortcuts), help);
         }

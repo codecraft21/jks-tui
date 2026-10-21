@@ -54,8 +54,35 @@ For a private key, the certificate is the first one in its chain (for PKCS12, th
 certificate sharing the key's local key ID). Secret keys, and certificates that
 cannot be read, show `-` in these columns. Unrecognized algorithms show their
 OID. Use `Up` / `Down` or `j` / `k`
-to scroll the entries, or `o` to open another file. Cancelling the browser or the
-password prompt keeps the previously loaded keystore.
+to scroll the entries, `Enter` to inspect the selected entry, or `o` to open
+another file. Cancelling the browser or the password prompt keeps the previously
+loaded keystore.
+
+Press `Enter` on an entry to open its full-screen, read-only detail view. A
+selectable certificate hierarchy appears above the certificate fields, starting
+with the leaf selected. The fields show version, subject, issuer, serial number
+in hexadecimal and decimal, validity timestamps in UTC, public key algorithm and
+size, signature algorithm, and fingerprint. Long values wrap and can be scrolled.
+SHA-256 is the default fingerprint; SHA-1 is also available. Both hash the
+original certificate bytes.
+
+| Key | Action in the detail view |
+| --- | --- |
+| `Tab` / `Shift+Tab` | Switch focus between hierarchy and details |
+| `Up` / `Down` or `k` / `j` | Select a certificate or scroll the focused details |
+| `PageUp` / `PageDown`, `Home` / `End` | Scroll details by a page or to the start / end |
+| `f` | Toggle SHA-256 / SHA-1 fingerprints; kept while switching certificates |
+| `Esc` | Return to the entry list, preserving its selection and scroll position |
+| `q` / `Ctrl+C` | Quit |
+
+The hierarchy uses JKS's stored chain. For PKCS12 it links certificates stored in
+the file by issuer identity and available authority/subject identifiers, stopping
+with an explanation at missing or ambiguous issuers or cycles. It does not fetch
+certificates or verify trust. Entries without certificates still open with an
+explanation, and an unreadable certificate does not hide other chain members.
+Switching certificates resets detail scrolling. Small terminals show a resize
+hint when the panes cannot fit; back and quit shortcuts remain available. Import,
+export, extensions, PEM, ASN.1, and clipboard actions are not provided.
 
 The selected entry uses bold black text on a light cyan background, with explicit
 RGB colors for consistent contrast across terminal palettes, and a `>` marker.
@@ -79,9 +106,9 @@ characters such as emoji) are supported; PKCS12 Unicode aliases are also support
 Private keys are neither decrypted nor displayed. The app runs without
 Java or `keytool` installed. PKCS12 compatibility targets Java-generated stores.
 
-Press `q` to quit from the browser or main view, `Esc` to quit from the main view,
-or `Ctrl+C` to quit from any view (including the password prompt). The app restores
-the terminal when it exits.
+Press `q` to quit from the browser, main view, or detail view, `Esc` to quit from
+the main view, or `Ctrl+C` to quit from any view (including the password prompt).
+The app restores the terminal when it exits.
 
 ## Development
 
@@ -93,3 +120,17 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
+
+On Linux, macOS, or WSL, run the PTY smoke tests with Python 3 (standard library
+only) after building the app:
+
+```sh
+cargo build --locked
+python3 tests/terminal_smoke.py
+```
+
+Use `--binary /absolute/path/to/keystore-tui` for a different build location.
+The tests use a generated public-certificate fixture with an empty password and
+exercise opening, detail navigation, scrolling, fingerprints, resizing, and
+returning to the list. Both `q` and `Ctrl+C` must restore terminal modes, the
+alternate screen, and cursor visibility. The Linux CI job runs these checks too.
