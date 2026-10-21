@@ -1,9 +1,12 @@
 //! Full-screen, read-only entry inspection, independent of the entry table state.
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use ratatui::{
     Frame,
-    crossterm::event::KeyCode,
+    crossterm::event::{KeyCode, KeyEvent},
     layout::{Constraint, Layout},
     style::{Color, Style, Stylize},
     text::{Line, Span, Text},
@@ -15,6 +18,7 @@ use crate::{
         self,
         details::{Details, fingerprint, time_text},
     },
+    export::{self, ExportPrompt, Outcome, Scope},
     keystore::KeystoreEntry,
 };
 
@@ -43,10 +47,15 @@ pub struct EntryDetails {
     scroll: u16,
     page: u16,
     max_scroll: u16,
+    /// Where exports are suggested and relative export names are resolved.
+    directory: PathBuf,
+    export: Option<ExportPrompt>,
+    /// The last export result, and whether it failed.
+    message: Option<(String, bool)>,
 }
 
 impl EntryDetails {
-    pub fn new(entry: usize, data: &KeystoreEntry) -> Self {
+    pub fn new(entry: usize, data: &KeystoreEntry, directory: PathBuf) -> Self {
         Self {
             entry,
             hierarchy: TableState::default().with_selected(data.certificates.len().checked_sub(1)),
@@ -60,7 +69,71 @@ impl EntryDetails {
             scroll: 0,
             page: 1,
             max_scroll: 0,
+            directory,
+            export: None,
+            message: None,
         }
+    }
+
+    /// Whether keys are typed into an export file name instead of acting as shortcuts.
+    pub fn exporting(&self) -> bool {
+        self.export.is_some()
+    }
+
+    /// Handles a key press; returns `true` when the view should close.
+    pub fn handle_event(&mut self, key: KeyEvent, entry: &KeystoreEntry) -> bool {
+        if let Some(prompt) = &mut self.export {
+            match prompt.handle_key(key) {
+                Outcome::Editing => self.message = None,
+                Outcome::Cancelled => {
+                    self.export = None;
+                    self.message = None;
+                }
+                Outcome::Save(path) => {
+                    let scope = prompt.scope;
+                    let certificates = match scope {
+                        Scope::Certificate => self
+                            .selected_certificate()
+                            .map(|index| vec![entry.certificates[index].clone()])
+                            .unwrap_or_default(),
+                        Scope::Chain => entry.certificates.clone(),
+                    };
+                    match export::save(&path, &certificates) {
+                        Ok(()) => {
+                            self.export = None;
+                            self.message = Some((
+                                format!("Saved {} to '{}'.", scope.label(), path.display()),
+                                false,
+                            ));
+                        }
+                        // Keep the prompt open so the name can be corrected.
+                        Err(error) => self.message = Some((error, true)),
+                    }
+                }
+            }
+            return false;
+        }
+        self.message = None;
+        match key.code {
+            KeyCode::Esc => return true,
+            KeyCode::Char('x') | KeyCode::Char('X') if self.selected_certificate().is_some() => {
+                let scope = if key.code == KeyCode::Char('X') {
+                    Scope::Chain
+                } else {
+                    Scope::Certificate
+                };
+                self.export = Some(ExportPrompt::new(scope, &self.directory, &entry.alias));
+            }
+            code => self.handle_key(code),
+        }
+        false
+    }
+
+    /// The `metadata` and stored-certificate index selected in the hierarchy.
+    fn selected_certificate(&self) -> Option<usize> {
+        self.hierarchy
+            .selected()
+            .map(|i| self.metadata.len() - 1 - i)
     }
 
     pub fn handle_key(&mut self, key: KeyCode) {
@@ -103,11 +176,7 @@ impl EntryDetails {
         if let Some(warning) = entry.chain_warning {
             text.push_str(&format!("{warning}\n\n"));
         }
-        let Some(index) = self
-            .hierarchy
-            .selected()
-            .map(|i| self.metadata.len() - 1 - i)
-        else {
+        let Some(index) = self.selected_certificate() else {
             text.push_str("No certificate is stored with this entry.");
             return Text::from(text);
         };
@@ -163,9 +232,11 @@ impl EntryDetails {
 
     pub fn draw(&mut self, frame: &mut Frame, entry: &KeystoreEntry) {
         let area = frame.area();
-        let shortcuts = Paragraph::new("Tab Focus | ↑/↓ j/k Navigate | PgUp/PgDn Home/End Scroll\nf SHA-256/SHA-1 | Esc Back | q / Ctrl+C Quit").wrap(Wrap { trim: false });
-        let footer_height = u16::try_from(shortcuts.line_count(area.width)).unwrap_or(u16::MAX);
-        if area.width < 20 || area.height < footer_height.saturating_add(10) {
+        let shortcuts = "Tab Focus | ↑/↓ j/k Navigate | PgUp/PgDn Home/End Scroll\nf SHA-256/SHA-1 | x Export certificate | X Export chain | Esc Back | q / Ctrl+C Quit";
+        let minimum = Paragraph::new(shortcuts)
+            .wrap(Wrap { trim: false })
+            .line_count(area.width);
+        if area.width < 20 || usize::from(area.height) < minimum.saturating_add(10) {
             frame.render_widget(
                 Paragraph::new("Resize terminal for entry details. Esc Back | q / Ctrl+C Quit")
                     .wrap(Wrap { trim: false }),
@@ -173,7 +244,11 @@ impl EntryDetails {
             );
             return;
         }
-        let [header, content, footer] = Layout::vertical([
+        let footer = self.footer(shortcuts);
+        let footer_height = u16::try_from(footer.line_count(area.width))
+            .unwrap_or(u16::MAX)
+            .min(area.height / 2);
+        let [header, content, footer_area] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(0),
             Constraint::Length(footer_height),
@@ -256,7 +331,28 @@ impl EntryDetails {
         .unwrap_or(u16::MAX);
         self.scroll = self.scroll.min(self.max_scroll);
         frame.render_widget(paragraph.scroll((self.scroll, 0)).block(block), details);
-        frame.render_widget(shortcuts, footer);
+        frame.render_widget(footer, footer_area);
+    }
+
+    /// The export result, then either the export name being typed or the shortcuts.
+    fn footer(&self, shortcuts: &'static str) -> Paragraph<'static> {
+        let mut lines = Vec::new();
+        if let Some((message, failed)) = &self.message {
+            let color = if *failed { Color::Red } else { Color::Green };
+            lines.push(Line::from(message.clone()).fg(color));
+        }
+        if let Some(prompt) = &self.export {
+            lines.push(Line::from(vec![
+                Span::raw(format!("Save {} to: ", prompt.scope.label())).bold(),
+                Span::raw(format!("{}_", prompt.path)),
+            ]));
+            lines.push(Line::from(
+                "A .der name saves DER, any other PEM | Enter Save | Ctrl+U Clear | Esc Cancel | Ctrl+C Quit",
+            ));
+        } else {
+            lines.extend(Text::from(shortcuts).lines);
+        }
+        Paragraph::new(lines).wrap(Wrap { trim: false })
     }
 }
 
@@ -293,7 +389,7 @@ mod tests {
     #[test]
     fn only_expired_valid_until_timestamps_render_red() {
         let data = entry(vec![metadata_certificate("leaf", "root", &[1], &[])]);
-        let view = EntryDetails::new(0, &data);
+        let view = EntryDetails::new(0, &data, PathBuf::new());
         let info = view.metadata[0].as_ref().unwrap();
         let expiry = info.not_after.to_unix();
         let timestamp = time_text(&info.not_after);
@@ -325,7 +421,7 @@ mod tests {
             metadata_certificate("leaf", "root", &[1], &[]),
             metadata_certificate("root", "root", &[2], &[]),
         ]);
-        let mut view = EntryDetails::new(0, &data);
+        let mut view = EntryDetails::new(0, &data, PathBuf::new());
         let screen = draw(&mut view, &data, 100, 50);
         assert!(screen.find("CN=root").unwrap() < screen.find("CN=leaf").unwrap());
         assert!(view.text(&data, 0).to_string().contains("Subject: CN=leaf"));
@@ -348,7 +444,7 @@ mod tests {
     fn wrapped_values_remain_accessible_with_scrolling_and_resizing() {
         let long_name = format!("{}THE-END", "long-name-界".repeat(30));
         let data = entry(vec![metadata_certificate(&long_name, "root", &[1], &[])]);
-        let mut view = EntryDetails::new(0, &data);
+        let mut view = EntryDetails::new(0, &data, PathBuf::new());
         assert!(!draw(&mut view, &data, 40, 24).contains("THE-END"));
         view.handle_key(KeyCode::Tab);
         assert!(view.details_focused);
@@ -388,7 +484,7 @@ mod tests {
             metadata_certificate("leaf", "root", &[1], &[critical_ca]),
             metadata_certificate("root", "root", &[2], &[]),
         ]);
-        let mut view = EntryDetails::new(0, &data);
+        let mut view = EntryDetails::new(0, &data, PathBuf::new());
         let text = view.text(&data, 0).to_string();
         let fingerprint = text.find("Fingerprint (SHA-256)").unwrap();
         let section = text.find("Extensions:\n  Basic Constraints (2.5.29.19) [critical]\n    CA: true, path length: unlimited\n").unwrap();
@@ -404,7 +500,7 @@ mod tests {
             b"unreadable".to_vec(),
             metadata_certificate("root", "root", &[2], &[]),
         ]);
-        let mut view = EntryDetails::new(0, &data);
+        let mut view = EntryDetails::new(0, &data, PathBuf::new());
         let screen = draw(&mut view, &data, 100, 30);
         assert!(screen.contains("Certificate 1"));
         assert!(screen.contains("Certificate could not be decoded"));
@@ -419,7 +515,7 @@ mod tests {
             .map(|i| metadata_certificate(&format!("certificate-{i}"), "issuer", &[1], &[]))
             .collect();
         let data = entry(certificates);
-        let mut view = EntryDetails::new(0, &data);
+        let mut view = EntryDetails::new(0, &data, PathBuf::new());
         assert!(draw(&mut view, &data, 80, 24).contains("CN=certificate-0"));
         for _ in 0..29 {
             view.handle_key(KeyCode::Up);

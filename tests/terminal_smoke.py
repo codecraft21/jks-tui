@@ -6,6 +6,7 @@ Requires Python 3 and a Unix terminal API (including Linux/WSL); no pip packages
 """
 
 import argparse
+import base64
 import errno
 import fcntl
 import hashlib
@@ -278,15 +279,63 @@ class TerminalSmoke(unittest.TestCase):
     def test_ctrl_c_while_filtering_restores_terminal(self):
         self.triage(True, b"\x03")
 
+    def certificate_file(self, exit_key):
+        der = fixture_certificate()
+        pem = certificate_pem(der)
+        with tempfile.TemporaryDirectory(prefix="terminal-check-", dir=ROOT / "target") as directory:
+            Path(directory, "bundle.pem").write_text(pem)
+            with PtyApp(self.binary, directory) as app:
+                app.expect("No keystore selected")
+                app.send(b"o")
+                app.expect("bundle.pem")
+                app.send(b"\x1b[B")  # Skip the parent-directory row.
+                app.send(b"\r")
+                app.expect("JKS TUI test fixture", "Certificate", "1 entries | Sort: alias")
+                app.send(b"\r")
+                app.expect("Certificate hierarchy", "x Export certificate")
+                app.send(b"x")
+                app.expect("Save certificate to:")
+                app.send(b"\x15")  # Ctrl+U clears the suggested absolute path.
+                app.expect("Save certificate to: _")
+                app.send(b"q")  # Typed into the name, not a quit.
+                app.expect("Save certificate to: q_")
+                self.assertIsNone(app.process.poll())
+                app.send(b"x\x7f.pem\r")  # Backspace, then save next to the file.
+                app.expect("Saved certificate to")
+                saved = Path(directory, "q.pem")
+                self.assertEqual(saved.read_text(), pem)
+                app.send(b"X")
+                app.expect("Save chain to:")
+                app.send(b"\x1b")  # Cancels the export, staying in the details.
+                app.expect("x Export certificate", "Certificate hierarchy")
+                app.send(exit_key)
+                app.assert_restored(self)
+
+    def test_certificate_file_export_then_quit_restores_terminal(self):
+        self.certificate_file(b"q")
+
+    def test_certificate_file_export_then_ctrl_c_restores_terminal(self):
+        self.certificate_file(b"\x03")
+
+
+def fixture_certificate():
+    """The DER certificate stored in the public fixture under `root-cert`."""
+    data = (ROOT / "tests/fixtures/trusted-cert.jks").read_bytes()
+    offset = 12 + 4 + 2 + len(b"root-cert") + 8 + 2 + len(b"X.509")
+    length = struct.unpack(">I", data[offset : offset + 4])[0]
+    return data[offset + 4 : offset + 4 + length]
+
+
+def certificate_pem(der):
+    body = base64.b64encode(der).decode()
+    lines = [body[i : i + 64] for i in range(0, len(body), 64)]
+    return "-----BEGIN CERTIFICATE-----\n" + "\n".join(lines) + "\n-----END CERTIFICATE-----\n"
 
 def triage_keystore():
     """Build an empty-password JKS with three copies of the public fixture
     certificate. One copy's notAfter is moved earlier to exercise sorting;
     certificate signatures are never checked by the app."""
-    data = (ROOT / "tests/fixtures/trusted-cert.jks").read_bytes()
-    offset = 12 + 4 + 2 + len(b"root-cert") + 8 + 2 + len(b"X.509")
-    length = struct.unpack(">I", data[offset : offset + 4])[0]
-    certificate = data[offset + 4 : offset + 4 + length]
+    certificate = fixture_certificate()
     not_after = b"361009194829Z"
     assert certificate.count(not_after) == 1, "unexpected fixture expiry"
     earlier = certificate.replace(not_after, b"301009194829Z")

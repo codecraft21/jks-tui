@@ -11,6 +11,7 @@ document, and also the README if users will notice.
 - [Loading and validation](#loading-and-validation)
   - [JKS compatibility (matching Java)](#jks-compatibility-matching-java)
   - [PKCS12 compatibility](#pkcs12-compatibility)
+  - [Certificate files](#certificate-files)
 - [Password prompt](#password-prompt)
 - [Entry list](#entry-list)
   - [Filtering](#filtering)
@@ -18,25 +19,29 @@ document, and also the README if users will notice.
 - [Entry details](#entry-details)
   - [Extensions](#extensions)
   - [Certificate hierarchy](#certificate-hierarchy)
+  - [Exporting](#exporting)
   - [Small terminals](#small-terminals)
 - [Visual style](#visual-style)
 - [Quitting and terminal restoration](#quitting-and-terminal-restoration)
 
 ## Scope
 
-- The app reads Java KeyStore (JKS) and Java-generated PKCS12 files. It never
-  writes or modifies them.
+- The app reads Java KeyStore (JKS) and Java-generated PKCS12 files, and
+  standalone certificate files. It never writes or modifies them.
+- The only files it writes are new certificate exports; see
+  [Exporting](#exporting).
 - It runs without Java or `keytool` installed.
-- Private keys are never decrypted or displayed.
-- The following are out of scope for now: import, export, PEM and raw ASN.1
+- Private keys are never decrypted, displayed, or exported.
+- The following are out of scope for now: import, keystore editing, raw ASN.1
   views, and clipboard actions.
 
 ## File selection
 
 - The browser starts in the working directory. If a keystore is open, it starts
   in that keystore's directory.
-- It lists directories, then files whose extension is `.jks`, `.p12`, or `.pfx`
-  (case-insensitive). Directories come first.
+- It lists directories, then files whose extension is `.jks`, `.p12`, `.pfx`,
+  `.pem`, `.crt`, `.cer`, `.der`, `.p7b`, or `.p7c` (case-insensitive).
+  Directories come first.
 - A `../` entry leads to the parent directory. Selection wraps at both ends, and
   `../` takes part in the wrap.
 - Cancelling the browser keeps the keystore that was already loaded.
@@ -44,7 +49,13 @@ document, and also the README if users will notice.
 ## Loading and validation
 
 - Files larger than 64 MiB are refused.
-- The format comes from the file content, not the extension.
+- The format comes from the file content where it is unambiguous:
+  1. The JKS magic number means JKS.
+  2. A PEM `-----BEGIN ` line means a certificate file.
+  3. Otherwise a `.p12` or `.pfx` name means PKCS12, and a certificate-file
+     extension means a DER certificate or PKCS#7 bundle.
+  4. Other DER content is tried as a certificate file, then as PKCS12.
+  5. Anything else is read as JKS, so its error describes a JKS file.
 - **JKS:** the header, lengths, counts, and structure are checked before the
   password prompt appears.
 - **PKCS12:** the outer structure is checked before the password prompt appears.
@@ -72,6 +83,24 @@ document, and also the README if users will notice.
 - A verified store may still contain entries that cannot be read. In that case
   the readable entries are listed, along with a persistent warning that the list
   is incomplete.
+
+### Certificate files
+
+- A certificate file opens without a password prompt.
+- Accepted forms:
+  - PEM blocks labelled `CERTIFICATE`, `X509 CERTIFICATE`, or `TRUSTED
+    CERTIFICATE` (OpenSSL's trust settings after the certificate are ignored)
+  - PEM `PKCS7` or `CMS` blocks, and DER PKCS#7 SignedData; their X.509
+    certificates are listed and anything else in them is ignored
+  - a single DER certificate, which must be one complete DER element
+- Text outside PEM blocks is ignored. Other PEM blocks, such as private keys,
+  are not decoded; a persistent yellow warning says some were skipped.
+- A malformed PEM block, invalid Base64, or a file without any certificate is
+  an error. A certificate inside a PEM block that cannot be decoded is still
+  listed, as for keystores.
+- Each certificate is one entry of type `Certificate`, listed in file order
+  (the alias sort keeps that order). The alias is the subject common name, else
+  the whole subject, else `Certificate N` for its position in the file.
 
 ## Password prompt
 
@@ -193,7 +222,33 @@ document, and also the README if users will notice.
 - **PKCS12:** the app links certificates stored in the file by issuer identity
   and by any authority and subject key identifiers. It stops with an explanation
   when an issuer is missing or ambiguous, or when it finds a cycle.
+- **Certificate files:** each entry's chain follows issuer names to the first
+  certificate in the same file with that subject. Names are compared by their
+  decoded text, ignoring case. The chain stops at a self-issued certificate, a
+  missing issuer, or a certificate already in the chain.
 - The app never fetches certificates and never verifies trust or signatures.
+
+### Exporting
+
+- `x` exports the certificate selected in the hierarchy; `X` exports every
+  certificate stored with the entry, leaf first. Neither does anything for an
+  entry without certificates.
+- A prompt replaces the detail shortcuts. It suggests `<alias>.pem` or
+  `<alias>-chain.pem` in the open file's directory. Characters other than
+  letters, digits, `-`, `_`, and `.` in the alias become `_`, and a name that
+  already exists gets a number, such as `server-2.pem`.
+- While the prompt is open, every character without `Ctrl` or `Alt` is typed
+  into the name, including `q`, `x`, and `j`. `Backspace` deletes a character,
+  `Ctrl+U` clears the name, `Enter` saves, and `Esc` cancels without leaving the
+  detail view. `Ctrl+C` still quits.
+- A relative name is resolved against the open file's directory.
+- A `.der` name (case-insensitive) saves one certificate as raw DER; a chain
+  cannot be saved as DER. Any other name saves PEM `CERTIFICATE` blocks with
+  64-character lines. The certificates are written byte for byte as stored.
+- The file must not exist yet; it is never replaced. On success a green message
+  names the saved file and the prompt closes. On failure a red message explains
+  why and the prompt stays open to correct the name. The message clears on the
+  next key.
 
 ### Small terminals
 
@@ -214,12 +269,13 @@ document, and also the README if users will notice.
 
 ## Quitting and terminal restoration
 
-- `q` quits from the browser, the entry list, and the detail view.
+- `q` quits from the browser, the entry list, and the detail view, except while
+  an export name is being typed; see [Exporting](#exporting).
 - `Esc` quits from the entry list.
 - While a filter is being typed, `q` and `Esc` edit the filter instead; see
   [Filtering](#filtering).
 - `Ctrl+C` quits from any view, including the password prompt and while typing
-  a filter.
+  a filter or an export name.
 - The terminal is restored on normal exit, on errors, and when initialization
   fails. Restoring means raw mode is turned off, the alternate screen is left,
   and the cursor is visible again.
