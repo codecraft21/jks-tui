@@ -201,7 +201,7 @@ fn pkcs12_renamed_as_jks_opens_after_password_verification() {
     press(&mut app, KeyCode::Enter);
     assert_eq!(app.keystore_path, Some(path));
     assert_eq!(app.entries[0].alias, "root-cert");
-    assert!(!app.incomplete_warning);
+    assert!(app.warning.is_none());
 }
 
 #[test]
@@ -470,7 +470,7 @@ fn a_missing_directory_does_not_close_the_browser() {
 fn empty_directories_and_small_terminals_are_handled() {
     let directory = TestDirectory::new();
     let mut app = browsing(directory.path());
-    assert!(screen(&mut app, 100, 24).contains("No .jks, .p12, or .pfx files in this directory."));
+    assert!(screen(&mut app, 100, 24).contains("No keystore (.jks, .p12, .pfx) or certificate"));
     press(&mut app, KeyCode::Up);
     press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Home);
@@ -621,7 +621,7 @@ fn path_bar_is_blank_until_loaded_and_clips_without_wrapping() {
     let lines: Vec<_> = rendered.lines().collect();
     assert_eq!(lines[8].trim_end(), "An opening error");
     assert_eq!(lines[10], "Path: '/a long direc");
-    assert!(lines[11].starts_with("o Open keystore"));
+    assert!(lines[11].starts_with("o Open file"));
 
     for (width, height) in [(1, 1), (5, 3), (20, 5), (0, 0)] {
         buffer(&mut app, width, height);
@@ -1045,4 +1045,131 @@ fn expiring_soon_dates_use_a_readable_warning_color() {
         .collect();
     assert_eq!(warning, soon_text);
     assert_eq!(red_text(&mut app), "2001-02-03");
+}
+
+#[test]
+fn certificate_files_open_without_a_prompt_in_file_order() {
+    use crown::asn1::pem;
+    let directory = TestDirectory::new();
+    let der = test_support::fixture_certificate_der();
+    let leaf = test_support::metadata_certificate("zz-leaf", "JKS TUI test fixture", &[1], &[]);
+    let pem_path = directory.path().join("bundle.crt");
+    let text = [
+        pem::encode("CERTIFICATE", &leaf),
+        pem::encode("PRIVATE KEY", b"synthetic, not a key"),
+        pem::encode("CERTIFICATE", der),
+    ]
+    .concat();
+    fs::write(&pem_path, text).unwrap();
+    // A DER certificate is recognised by content even without a known name.
+    let der_path = directory.path().join("unnamed");
+    fs::write(&der_path, der).unwrap();
+
+    let mut app = App::default();
+    app.open_file(pem_path);
+    assert!(app.password_prompt.is_none());
+    assert_eq!(shown_aliases(&app), ["zz-leaf", "JKS TUI test fixture"]);
+    let rendered = screen(&mut app, 120, 24);
+    assert!(rendered.contains("Certificate"));
+    assert!(rendered.contains("private keys, were not read"));
+    press(&mut app, KeyCode::Enter);
+    let details = screen(&mut app, 120, 50);
+    assert!(details.find("CN=JKS TUI test fixture").unwrap() < details.find("CN=zz-leaf").unwrap());
+
+    app.open_file(der_path);
+    assert!(app.error.is_none());
+    assert!(app.warning.is_none());
+    assert_eq!(shown_aliases(&app), ["JKS TUI test fixture"]);
+
+    let bad = directory.path().join("bad.pem");
+    fs::write(
+        &bad,
+        "-----BEGIN CERTIFICATE-----\n!!\n-----END CERTIFICATE-----\n",
+    )
+    .unwrap();
+    app.open_file(bad);
+    assert!(red_text(&mut app).contains("not a valid certificate file"));
+    assert_eq!(shown_aliases(&app), ["JKS TUI test fixture"]);
+}
+
+#[test]
+fn browser_lists_certificate_files() {
+    let directory = TestDirectory::new();
+    for name in ["a.pem", "b.CER", "c.p7b", "d.txt"] {
+        fs::write(directory.path().join(name), b"").unwrap();
+    }
+    let mut app = browsing(directory.path());
+    let rendered = screen(&mut app, 100, 24);
+    for name in ["a.pem", "b.CER", "c.p7b"] {
+        assert!(rendered.contains(name), "missing {name}");
+    }
+    assert!(!rendered.contains("d.txt"));
+}
+
+#[test]
+fn details_export_certificates_next_to_the_opened_file() {
+    let directory = TestDirectory::new();
+    let leaf = test_support::metadata_certificate("leaf", "root", &[1], &[]);
+    let root = test_support::metadata_certificate("root", "root", &[2], &[]);
+    let mut app = App::default();
+    app.show_entries(
+        directory.path().join("store.jks"),
+        vec![KeystoreEntry {
+            alias: "server".into(),
+            kind: "Private key",
+            certificate: None,
+            certificates: vec![leaf.clone(), root.clone()],
+            chain_warning: None,
+        }],
+    );
+    press(&mut app, KeyCode::Enter);
+    assert!(screen(&mut app, 120, 40).contains("x Export certificate"));
+
+    // Letters, including q, are typed into the name; Esc cancels only the prompt.
+    press(&mut app, KeyCode::Char('x'));
+    assert!(screen(&mut app, 120, 40).contains("Save certificate to: "));
+    assert!(!press(&mut app, KeyCode::Char('q')));
+    assert!(app.entry_details.as_ref().unwrap().exporting());
+    assert!(!press(&mut app, KeyCode::Esc));
+    assert!(app.entry_details.is_some());
+    assert!(!app.entry_details.as_ref().unwrap().exporting());
+
+    press(&mut app, KeyCode::Char('x'));
+    press(&mut app, KeyCode::Enter);
+    let saved = directory.path().join("server.pem");
+    assert!(
+        screen(&mut app, 200, 40).contains(&format!("Saved certificate to '{}'.", saved.display()))
+    );
+    assert_eq!(
+        fs::read_to_string(&saved).unwrap(),
+        crown::asn1::pem::encode("CERTIFICATE", &leaf)
+    );
+
+    // The root is selected one row up; DER is chosen by the .der name.
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Char('x'));
+    app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    type_password(&mut app, "root.der");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(fs::read(directory.path().join("root.der")).unwrap(), root);
+
+    // A chain cannot be DER; the prompt stays open with a red error.
+    app.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT));
+    assert!(screen(&mut app, 120, 40).contains("Save chain to: "));
+    app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    type_password(&mut app, "chain.der");
+    press(&mut app, KeyCode::Enter);
+    assert!(red_text(&mut app).contains("use a .pem name"));
+    assert!(app.entry_details.as_ref().unwrap().exporting());
+    press(&mut app, KeyCode::Esc);
+    app.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT));
+    press(&mut app, KeyCode::Enter);
+    let chain = fs::read_to_string(directory.path().join("server-chain.pem")).unwrap();
+    assert_eq!(
+        chain,
+        [leaf, root]
+            .map(|der| crown::asn1::pem::encode("CERTIFICATE", &der))
+            .concat()
+    );
+    assert!(press(&mut app, KeyCode::Char('q')));
 }

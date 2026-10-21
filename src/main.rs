@@ -1,6 +1,8 @@
 mod certificate;
+mod certificate_file;
 mod entry_details;
 mod entry_list;
+mod export;
 mod file_picker;
 mod keystore;
 mod pkcs12;
@@ -94,7 +96,17 @@ struct App {
     sort: SortOrder,
     entry_details: Option<entry_details::EntryDetails>,
     error: Option<String>,
-    incomplete_warning: bool,
+    /// Shown in yellow while the loaded file is displayed.
+    warning: Option<&'static str>,
+}
+
+const INCOMPLETE_WARNING: &str = "Warning: this PKCS12 entry list is incomplete.";
+const SKIPPED_WARNING: &str =
+    "Warning: PEM blocks other than certificates, such as private keys, were not read.";
+
+enum Loaded {
+    Store(Store),
+    Certificates(certificate_file::CertificateFile),
 }
 
 enum Store {
@@ -129,9 +141,7 @@ impl App {
             return false;
         }
 
-        if (key.code == KeyCode::Char('q')
-            && self.password_prompt.is_none()
-            && !self.editing_filter)
+        if (key.code == KeyCode::Char('q') && !self.typing())
             || (key.code == KeyCode::Char('c')
                 && key.modifiers.contains(KeyModifiers::CONTROL)
                 && !key.modifiers.contains(KeyModifiers::ALT))
@@ -149,10 +159,8 @@ impl App {
                 self.open_file(path);
             }
         } else if let Some(details) = &mut self.entry_details {
-            if key.code == KeyCode::Esc {
+            if details.handle_event(key, &self.entries[details.entry]) {
                 self.entry_details = None;
-            } else {
-                details.handle_key(key.code);
             }
         } else if self.editing_filter {
             self.handle_filter(key);
@@ -160,9 +168,16 @@ impl App {
             match key.code {
                 KeyCode::Enter => {
                     if let Some(index) = self.selected_entry() {
+                        let directory = self
+                            .keystore_path
+                            .as_deref()
+                            .and_then(Path::parent)
+                            .unwrap_or(Path::new("."))
+                            .to_path_buf();
                         self.entry_details = Some(entry_details::EntryDetails::new(
                             index,
                             &self.entries[index],
+                            directory,
                         ));
                     }
                 }
@@ -180,6 +195,16 @@ impl App {
         }
 
         false
+    }
+
+    /// Whether letter keys are typed as text rather than used as shortcuts.
+    fn typing(&self) -> bool {
+        self.password_prompt.is_some()
+            || self.editing_filter
+            || self
+                .entry_details
+                .as_ref()
+                .is_some_and(entry_details::EntryDetails::exporting)
     }
 
     fn handle_filter(&mut self, key: KeyEvent) {
@@ -269,7 +294,12 @@ impl App {
         // Parse the entire structure once, before prompting. Empty-password
         // stores are verified immediately; others require their password.
         let keystore = match load(&path) {
-            Ok(keystore) => keystore,
+            Ok(Loaded::Store(keystore)) => keystore,
+            Ok(Loaded::Certificates(file)) => {
+                self.show_entries(path, file.entries);
+                self.warning = file.skipped.then_some(SKIPPED_WARNING);
+                return;
+            }
             Err(error) => {
                 self.error = Some(error);
                 return;
@@ -302,12 +332,12 @@ impl App {
             TableState::default().with_selected((!self.visible.is_empty()).then_some(0));
         self.entry_details = None;
         self.error = None;
-        self.incomplete_warning = false;
+        self.warning = None;
     }
 
     fn show_verified(&mut self, path: PathBuf, verified: pkcs12::Verified) {
         self.show_entries(path, verified.entries);
-        self.incomplete_warning = verified.incomplete;
+        self.warning = verified.incomplete.then_some(INCOMPLETE_WARNING);
     }
 
     fn open_picker(&mut self) {
@@ -437,9 +467,10 @@ impl App {
         } else {
             frame.render_widget(
                 Paragraph::new(
-                    "No keystore selected.\n\nPress o to open a .jks, .p12, or .pfx file.",
+                    "No keystore selected.\n\nPress o to open a keystore (.jks, .p12, .pfx) or a certificate file (.pem, .crt, .cer, .der, .p7b, .p7c).",
                 )
-                .block(Block::bordered().title(" keystore-tui ".blue())),
+                .block(Block::bordered().title(" keystore-tui ".blue()))
+                .wrap(Wrap { trim: false }),
                 content,
             );
         }
@@ -450,10 +481,13 @@ impl App {
                     .wrap(Wrap { trim: false }),
                 status,
             );
-        } else if self.incomplete_warning && self.file_picker.is_none() {
+        } else if let Some(warning) = self.warning
+            && self.file_picker.is_none()
+        {
             frame.render_widget(
-                Paragraph::new("Warning: this PKCS12 entry list is incomplete.")
-                    .style(Style::default().fg(Color::Yellow)),
+                Paragraph::new(warning)
+                    .style(Style::default().fg(Color::Yellow))
+                    .wrap(Wrap { trim: false }),
                 status,
             );
         }
@@ -471,7 +505,7 @@ impl App {
             } else if self.editing_filter {
                 "Type to filter | Enter Apply | Esc Clear | Up/Down Scroll | Ctrl+C Quit"
             } else {
-                "o Open keystore | Enter Details | Up/Down j/k Scroll | / Filter | s Sort | q / Esc / Ctrl+C Quit"
+                "o Open file | Enter Details | Up/Down j/k Scroll | / Filter | s Sort | q / Esc / Ctrl+C Quit"
             };
             frame.render_widget(Paragraph::new(shortcuts), help);
         }
@@ -500,26 +534,48 @@ fn is_text_input(modifiers: KeyModifiers) -> bool {
     (cfg!(windows) && control && alt) || (!control && !alt)
 }
 
-fn load(path: &Path) -> Result<Store, String> {
+/// Detects the format from the content first, then from the file name.
+fn load(path: &Path) -> Result<Loaded, String> {
     let data = read_limited(path, MAX_KEYSTORE_SIZE)
         .map_err(|error| format!("Cannot read {}: {error}", path.display()))?;
-    if data.starts_with(&keystore::MAGIC.to_be_bytes()) {
-        keystore::parse(data)
-            .map(Store::Jks)
-            .map_err(|error| format!("{} is not a valid JKS keystore: {error}", path.display()))
-    } else if data.first() == Some(&0x30)
-        || path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("p12") || ext.eq_ignore_ascii_case("pfx"))
-    {
+    let is_pkcs12_name = path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("p12") || ext.eq_ignore_ascii_case("pfx"));
+    let certificates = || {
+        certificate_file::parse(&data)
+            .map(Loaded::Certificates)
+            .map_err(|error| {
+                format!(
+                    "{} is not a valid certificate file: {error}",
+                    path.display()
+                )
+            })
+    };
+    let pkcs12 = || {
         pkcs12::parse(&data)
-            .map(Store::Pkcs12)
+            .map(|store| Loaded::Store(Store::Pkcs12(store)))
             .map_err(|error| format!("{} is not a valid PKCS12 keystore: {error}", path.display()))
+    };
+    if data.starts_with(&keystore::MAGIC.to_be_bytes()) {
+        jks(data, path)
+    } else if certificate_file::is_pem(&data) {
+        certificates()
+    } else if is_pkcs12_name {
+        pkcs12()
+    } else if certificate_file::has_extension(path) {
+        certificates()
+    } else if data.first() == Some(&0x30) {
+        // A PFX never reads as a certificate or PKCS#7 bundle, so try those first.
+        certificates().or_else(|_| pkcs12())
     } else {
-        keystore::parse(data)
-            .map(Store::Jks)
-            .map_err(|error| format!("{} is not a valid JKS keystore: {error}", path.display()))
+        jks(data, path)
     }
+}
+
+fn jks(data: Vec<u8>, path: &Path) -> Result<Loaded, String> {
+    keystore::parse(data)
+        .map(|store| Loaded::Store(Store::Jks(store)))
+        .map_err(|error| format!("{} is not a valid JKS keystore: {error}", path.display()))
 }
 
 fn read_limited(path: &Path, limit: u64) -> io::Result<Vec<u8>> {

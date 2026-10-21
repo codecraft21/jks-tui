@@ -30,12 +30,12 @@ impl FilePicker {
         for entry in fs::read_dir(&directory)? {
             let path = entry?.path();
             let is_directory = path.is_dir();
-            let is_keystore = path.extension().is_some_and(|extension| {
+            let is_supported = path.extension().is_some_and(|extension| {
                 ["jks", "p12", "pfx"]
                     .iter()
                     .any(|ext| extension.eq_ignore_ascii_case(ext))
-            });
-            if is_directory || (is_keystore && path.is_file()) {
+            }) || crate::certificate_file::has_extension(&path);
+            if is_directory || (is_supported && path.is_file()) {
                 entries.push(Entry { path, is_directory });
             }
         }
@@ -143,7 +143,7 @@ impl FilePicker {
             horizontal: 2,
             vertical: 1,
         });
-        let block = Block::bordered().title(" Open keystore (.jks, .p12, .pfx) ");
+        let block = Block::bordered().title(" Open keystore or certificate file ");
         let inner = block.inner(area);
         frame.render_widget(Clear, area);
         frame.render_widget(block, area);
@@ -183,7 +183,7 @@ impl FilePicker {
             (error.as_str(), Color::Red)
         } else if !self.entries.iter().any(|entry| !entry.is_directory) {
             (
-                "No .jks, .p12, or .pfx files in this directory.",
+                "No keystore (.jks, .p12, .pfx) or certificate (.pem, .crt, .cer, .der, .p7b, .p7c) files in this directory.",
                 Color::Gray,
             )
         } else {
