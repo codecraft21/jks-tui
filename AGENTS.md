@@ -13,7 +13,6 @@ This file covers how the code is organised and how to work on it.
 - [Conventions and constraints](#conventions-and-constraints)
 - [Documentation](#documentation)
 - [Workflow](#workflow)
-  - [Publishing](#publishing)
 
 ## Architecture
 
@@ -107,27 +106,17 @@ runtime from synthetic bytes, so no private key is ever committed.
 
 ## Workflow
 
-- Use the configured GitHub plugin to publish commits, create pull requests,
-  check CI, and merge. Use local Git for inspection and checkout management.
-  Publishing must not require Git credentials in the workspace.
-- When reporting back, say what changed, which checks ran, and any unresolved
-  failures.
+When the user says "publish", do the following without asking for confirmation.
+Use the configured GitHub plugin for every GitHub step, so that no Git
+credentials are needed in the workspace. Use local Git only for inspection and
+checkouts.
 
-### Publishing
+1. Run the [Development](#development) checks and fix any failures.
+2. Commit to a feature branch, never `main`, and push it.
+3. Open a pull request against `main`.
+4. When CI finishes, merge if every check passed. If a check failed, fix it and
+   push again, or report what is failing.
+5. After merging, switch to `main`, pull, and delete the local feature branch.
 
-When the user says "publish", carry out all of these steps without asking for
-confirmation:
-
-1. Run the checks from [Development](#development) locally and fix any
-   failures.
-2. Commit the work to a feature branch, never directly to `main`, and publish
-   that branch.
-3. Open a pull request against `main`. Describe what changed and which checks
-   ran.
-4. Wait for the pull request's CI checks to finish.
-   - If they all pass, merge the pull request.
-   - If any fail, do not merge. Fix the failure and push again, or report what
-     is failing and why.
-5. After the merge, bring the local workspace up to date: switch to `main`,
-   pull the merged result, and delete the local feature branch.
-6. Report the pull request link, the check results, and whether it was merged.
+When reporting back, give the pull request link, what changed, which checks ran
+and their results, and any unresolved failures.
