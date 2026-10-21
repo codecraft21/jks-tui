@@ -1,6 +1,9 @@
 # Agent guidance
 
 - Read `README.md` for the current scope, run instructions, and development checks.
+- Use the configured GitHub plugin to publish commits, create pull requests,
+  check CI, and merge. Use local Git for inspection and checkout management;
+  publishing must not require Git credentials in the workspace.
 - Keep changes focused on the small TUI; introduce modules as responsibilities grow.
 - Preserve terminal restoration on initialization failure, errors, and normal exit,
   along with all documented quit shortcuts.
