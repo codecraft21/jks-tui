@@ -2,7 +2,8 @@
 
 - Read `README.md` for the current scope, run instructions, and development checks.
 - Keep changes focused on the small TUI; introduce modules as responsibilities grow.
-- Preserve terminal cleanup through `ratatui::run` and all documented quit shortcuts.
+- Preserve terminal restoration on initialization failure, errors, and normal exit,
+  along with all documented quit shortcuts.
 - Keep dependencies and their features minimal. The JKS format is parsed in
   `src/keystore.rs`; its only cryptographic dependency is SHA-1 hashing.
 - Keep the app self-contained: opening keystores must work without Java or

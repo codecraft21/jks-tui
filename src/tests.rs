@@ -218,16 +218,22 @@ fn entry_list_shows_certificate_algorithm_key_size_and_expiry() {
                 alias: "current".into(),
                 kind: "Trusted certificate",
                 certificate: Some(fixture_summary()),
+                certificates: vec![],
+                chain_warning: None,
             },
             KeystoreEntry {
                 alias: "expired".into(),
                 kind: "Private key",
                 certificate: Some(expired),
+                certificates: vec![],
+                chain_warning: None,
             },
             KeystoreEntry {
                 alias: "secret".into(),
                 kind: "Secret key",
                 certificate: None,
+                certificates: vec![],
+                chain_warning: None,
             },
         ],
     );
@@ -322,6 +328,8 @@ fn partial_pkcs12_warning_persists_with_entries() {
                 alias: "readable".into(),
                 kind: "Secret key",
                 certificate: None,
+                certificates: vec![],
+                chain_warning: None,
             }],
             incomplete: true,
         },
@@ -631,6 +639,8 @@ fn entry_list_scrolls_to_entries_below_the_viewport() {
                 alias: format!("entry-{index:02}"),
                 kind: "Trusted certificate",
                 certificate: None,
+                certificates: vec![],
+                chain_warning: None,
             })
             .collect(),
     );
@@ -725,4 +735,86 @@ fn ctrl_alt_c_does_not_quit() {
     );
     assert!(!app.handle_key(altgr_c));
     assert!(app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+}
+
+#[test]
+fn enter_opens_full_screen_details_and_escape_preserves_list_state() {
+    let mut app = App::default();
+    let certificates = vec![test_support::fixture_certificate_der().to_vec()];
+    app.show_entries(
+        PathBuf::from("/keystore.jks"),
+        (0..40)
+            .map(|i| KeystoreEntry {
+                alias: format!("entry-{i:02}"),
+                kind: "Trusted certificate",
+                certificate: Some(fixture_summary()),
+                certificates: certificates.clone(),
+                chain_warning: None,
+            })
+            .collect(),
+    );
+    for _ in 0..35 {
+        press(&mut app, KeyCode::Down);
+        screen(&mut app, 100, 20);
+    }
+    let previous = app.entries_state;
+    let previous_screen = screen(&mut app, 100, 20);
+    assert!(!press(&mut app, KeyCode::Enter));
+    let details = screen(&mut app, 120, 50);
+    for label in [
+        "entry-35",
+        "Certificate hierarchy",
+        "Version:",
+        "Subject:",
+        "Issuer:",
+        "Serial Number (hex):",
+        "Serial Number (dec):",
+        "Valid From:",
+        "Valid Until:",
+        "Public Key: EC 256 bits",
+        "Signature Algorithm:",
+        "Fingerprint (SHA-256):",
+    ] {
+        assert!(details.contains(label), "missing {label}");
+    }
+    assert!(!details.contains("Path:"));
+    assert!(!press(&mut app, KeyCode::Esc));
+    assert!(app.entry_details.is_none());
+    assert_eq!(app.entries_state, previous);
+    assert_eq!(screen(&mut app, 100, 20), previous_screen);
+    press(&mut app, KeyCode::Enter);
+    assert!(press(&mut app, KeyCode::Char('q')));
+    assert!(app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+    assert!(!app.handle_key(KeyEvent::new_with_kind(
+        KeyCode::Esc,
+        KeyModifiers::NONE,
+        KeyEventKind::Release
+    )));
+    assert!(app.entry_details.is_some());
+}
+
+#[test]
+fn enter_handles_empty_lists_and_entries_without_certificates() {
+    let mut app = App::default();
+    press(&mut app, KeyCode::Enter);
+    assert!(app.entry_details.is_none());
+    app.show_entries(PathBuf::from("/empty.jks"), vec![]);
+    press(&mut app, KeyCode::Enter);
+    assert!(app.entry_details.is_none());
+    app.show_entries(
+        PathBuf::from("/secret.p12"),
+        vec![KeystoreEntry {
+            alias: "secret".into(),
+            kind: "Secret key",
+            certificate: None,
+            certificates: vec![],
+            chain_warning: None,
+        }],
+    );
+    press(&mut app, KeyCode::Enter);
+    let rendered = screen(&mut app, 100, 24);
+    assert!(rendered.contains("Type: Secret key"));
+    assert!(rendered.contains("No certificate is stored with this entry"));
+    assert!(!press(&mut app, KeyCode::Esc));
+    assert!(press(&mut app, KeyCode::Esc));
 }

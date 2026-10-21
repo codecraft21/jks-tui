@@ -142,3 +142,49 @@ pub fn mixed_keystore() -> Vec<u8> {
     builder.entry(PRIVATE_KEY_TAG, b"server-key", VERSION_02, 1);
     builder.finish("changeit")
 }
+
+/// Builds display-only certificates using the generated fixture's public SPKI.
+/// Signatures remain synthetic; no private key is needed or stored.
+pub fn metadata_certificate(
+    subject: &str,
+    issuer: &str,
+    serial: &[u8],
+    extensions: &[Vec<u8>],
+) -> Vec<u8> {
+    use crown::{
+        asn1::{Reader, der},
+        x509::name::Name,
+    };
+    let mut certificate = Reader::new(fixture_certificate_der())
+        .read_sequence()
+        .unwrap();
+    let mut tbs = certificate.read_sequence().unwrap();
+    tbs.read_raw_tlv().unwrap(); // Version.
+    tbs.read_raw_tlv().unwrap(); // Serial.
+    let signature = tbs.read_raw_tlv().unwrap();
+    tbs.read_raw_tlv().unwrap(); // Issuer.
+    let validity = tbs.read_raw_tlv().unwrap();
+    tbs.read_raw_tlv().unwrap(); // Subject.
+    let spki = tbs.read_raw_tlv().unwrap();
+    let mut body = [
+        der::explicit(0, &der::integer_i64(2)),
+        der::tlv(der::INTEGER, serial),
+        signature.to_vec(),
+        Name::from_common_name(issuer).encode(),
+        validity.to_vec(),
+        Name::from_common_name(subject).encode(),
+        spki.to_vec(),
+    ]
+    .concat();
+    if !extensions.is_empty() {
+        body.extend(der::explicit(3, &der::sequence(&extensions.concat())));
+    }
+    der::sequence(
+        &[
+            der::sequence(&body),
+            signature.to_vec(),
+            der::bit_string(0, &[1, 2, 3]),
+        ]
+        .concat(),
+    )
+}

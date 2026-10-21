@@ -24,3 +24,6 @@ jobs:
       run: cargo build --locked --verbose
     - name: Run tests
       run: cargo test --locked --verbose
+    - name: Exercise terminal interaction and restoration
+      run: python3 tests/terminal_smoke.py
+      timeout-minutes: 2
