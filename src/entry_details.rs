@@ -1,9 +1,12 @@
 //! Full-screen, read-only entry inspection, independent of the entry table state.
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use ratatui::{
     Frame,
     crossterm::event::KeyCode,
     layout::{Constraint, Layout},
     style::{Color, Style, Stylize},
+    text::{Line, Span, Text},
     widgets::{Block, Paragraph, Row, Table, TableState, Wrap},
 };
 
@@ -79,7 +82,7 @@ impl EntryDetails {
         }
     }
 
-    fn text(&self, entry: &KeystoreEntry) -> String {
+    fn text(&self, entry: &KeystoreEntry, now: i64) -> Text<'static> {
         let mut text = format!("Alias: {}\nType: {}\n\n", entry.alias, entry.kind);
         if let Some(warning) = entry.chain_warning {
             text.push_str(&format!("{warning}\n\n"));
@@ -90,18 +93,33 @@ impl EntryDetails {
             .map(|i| self.metadata.len() - 1 - i)
         else {
             text.push_str("No certificate is stored with this entry.");
-            return text;
+            return Text::from(text);
         };
+        let mut lines = Vec::new();
         if let Some(info) = &self.metadata[index] {
             let public_key = certificate::summarize(&entry.certificates[index]).map_or_else(
                 || "Unavailable".into(),
                 |summary| format!("{} {}", summary.algorithm, summary.key_size_text()),
             );
             text.push_str(&format!(
-                "Version: {}\n\nSubject: {}\n\nIssuer: {}\n\nSerial Number (hex): {}\n\nSerial Number (dec): {}\n\nValid From: {}\n\nValid Until: {}\n\nPublic Key: {}\n\nSignature Algorithm: {}\n\n",
+                "Version: {}\n\nSubject: {}\n\nIssuer: {}\n\nSerial Number (hex): {}\n\nSerial Number (dec): {}\n\nValid From: {}\n\n",
                 info.version, info.subject, info.issuer, info.serial_hex, info.serial_decimal,
-                time_text(&info.not_before), time_text(&info.not_after), public_key, info.signature_algorithm,
+                time_text(&info.not_before),
             ));
+            lines.extend(Text::from(text).lines);
+            let expiry = Span::raw(time_text(&info.not_after));
+            lines.push(Line::from(vec![
+                Span::raw("Valid Until: "),
+                if info.not_after.to_unix() < now {
+                    expiry.red()
+                } else {
+                    expiry
+                },
+            ]));
+            text = format!(
+                "\nPublic Key: {public_key}\n\nSignature Algorithm: {}\n\n",
+                info.signature_algorithm,
+            );
         } else {
             text.push_str("Certificate could not be decoded.\n\n");
         }
@@ -119,7 +137,8 @@ impl EntryDetails {
         {
             text.push_str("\nIssuer certificate is not stored in this chain.");
         }
-        text
+        lines.extend(Text::from(text).lines);
+        Text::from(lines)
     }
 
     pub fn draw(&mut self, frame: &mut Frame, entry: &KeystoreEntry) {
@@ -204,7 +223,10 @@ impl EntryDetails {
             })
             .border_style(Style::default().fg(focused(self.details_focused)));
         let inner = block.inner(details);
-        let paragraph = Paragraph::new(self.text(entry)).wrap(Wrap { trim: false });
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs() as i64);
+        let paragraph = Paragraph::new(self.text(entry, now)).wrap(Wrap { trim: false });
         self.page = inner.height.max(1);
         self.max_scroll = u16::try_from(
             paragraph
@@ -248,6 +270,35 @@ mod tests {
     }
 
     #[test]
+    fn only_expired_valid_until_timestamps_render_red() {
+        let data = entry(vec![metadata_certificate("leaf", "root", &[1], &[])]);
+        let view = EntryDetails::new(0, &data);
+        let info = view.metadata[0].as_ref().unwrap();
+        let expiry = info.not_after.to_unix();
+        let timestamp = time_text(&info.not_after);
+        for now in [expiry - 1, expiry, expiry + 1] {
+            let mut terminal = Terminal::new(TestBackend::new(100, 50)).unwrap();
+            terminal
+                .draw(|frame| {
+                    frame.render_widget(
+                        Paragraph::new(view.text(&data, now)).wrap(Wrap { trim: false }),
+                        frame.area(),
+                    );
+                })
+                .unwrap();
+            let red: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .filter(|cell| cell.fg == Color::Red)
+                .map(|cell| cell.symbol())
+                .collect();
+            assert_eq!(red, if now > expiry { &timestamp } else { "" });
+        }
+    }
+
+    #[test]
     fn starts_at_leaf_and_switching_certificates_resets_scroll_but_keeps_hash() {
         let data = entry(vec![
             metadata_certificate("leaf", "root", &[1], &[]),
@@ -256,16 +307,20 @@ mod tests {
         let mut view = EntryDetails::new(0, &data);
         let screen = draw(&mut view, &data, 100, 50);
         assert!(screen.find("CN=root").unwrap() < screen.find("CN=leaf").unwrap());
-        assert!(view.text(&data).contains("Subject: CN=leaf"));
+        assert!(view.text(&data, 0).to_string().contains("Subject: CN=leaf"));
         assert!(!view.details_focused);
         view.handle_key(KeyCode::Char('f'));
         view.handle_key(KeyCode::End);
         view.handle_key(KeyCode::Up);
         assert_eq!(view.scroll, 0);
-        assert!(view.text(&data).contains("Subject: CN=root"));
-        assert!(view.text(&data).contains("Fingerprint (SHA-1)"));
+        assert!(view.text(&data, 0).to_string().contains("Subject: CN=root"));
+        assert!(
+            view.text(&data, 0)
+                .to_string()
+                .contains("Fingerprint (SHA-1)")
+        );
         view.handle_key(KeyCode::Char('j'));
-        assert!(view.text(&data).contains("Subject: CN=leaf"));
+        assert!(view.text(&data, 0).to_string().contains("Subject: CN=leaf"));
     }
 
     #[test]
