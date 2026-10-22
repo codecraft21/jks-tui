@@ -10,6 +10,7 @@ document, and also the README if users will notice.
 - [File selection](#file-selection)
 - [Loading and validation](#loading-and-validation)
   - [JKS compatibility (matching Java)](#jks-compatibility-matching-java)
+  - [JCEKS compatibility](#jceks-compatibility)
   - [PKCS12 compatibility](#pkcs12-compatibility)
   - [Certificate files](#certificate-files)
 - [Password prompt](#password-prompt)
@@ -27,8 +28,8 @@ document, and also the README if users will notice.
 
 ## Scope
 
-- The app reads Java KeyStore (JKS) and Java-generated PKCS12 files, and
-  standalone certificate files. It never writes or modifies them.
+- The app reads Java KeyStore (JKS), JCEKS, and PKCS12 files, and standalone
+  certificate files. It never writes or modifies them.
 - The only files it writes are new certificate exports; see
   [Exporting](#exporting).
 - It runs without Java or `keytool` installed.
@@ -40,9 +41,9 @@ document, and also the README if users will notice.
 
 - The browser starts in the working directory. If a keystore is open, it starts
   in that keystore's directory.
-- It lists directories, then files whose extension is `.jks`, `.p12`, `.pfx`,
-  `.pem`, `.crt`, `.cer`, `.der`, `.p7b`, or `.p7c` (case-insensitive).
-  Directories come first.
+- It lists directories, then files whose extension is `.jks`, `.jceks`, `.p12`,
+  `.pfx`, `.pem`, `.crt`, `.cer`, `.der`, `.p7b`, or `.p7c`
+  (case-insensitive). Directories come first.
 - A `../` entry leads to the parent directory. Selection wraps at both ends, and
   `../` takes part in the wrap.
 - Cancelling the browser keeps the keystore that was already loaded.
@@ -51,14 +52,14 @@ document, and also the README if users will notice.
 
 - Files larger than 64 MiB are refused.
 - The format comes from the file content where it is unambiguous:
-  1. The JKS magic number means JKS.
+  1. The JKS magic number means JKS, and the JCEKS magic number means JCEKS.
   2. A PEM `-----BEGIN ` line means a certificate file.
   3. Otherwise a `.p12` or `.pfx` name means PKCS12, and a certificate-file
      extension means a DER certificate or PKCS#7 bundle.
   4. Other DER content is tried as a certificate file, then as PKCS12.
   5. Anything else is read as JKS, so its error describes a JKS file.
-- **JKS:** the header, lengths, counts, and structure are checked before the
-  password prompt appears.
+- **JKS and JCEKS:** the header, lengths, counts, and structure are checked
+  before the password prompt appears.
 - **PKCS12:** the outer structure is checked before the password prompt appears.
   The file must have an integrity MAC.
 - Entries are shown only after the password-based integrity check succeeds.
@@ -76,11 +77,34 @@ document, and also the README if users will notice.
 - Java allows an alias to contain an unpaired UTF-16 surrogate. Such a surrogate
   is shown as an escape, for example `\uD83D`.
 
+### JCEKS compatibility
+
+- JCEKS has the JKS layout and integrity digest, and everything under
+  [JKS compatibility](#jks-compatibility-matching-java) applies to it.
+- It adds secret-key entries, shown as `Secret key`. Java stores each one as a
+  serialized `SealedObject` without a length, so the app walks the Java
+  serialization grammar to find where it ends. The sealed key is never
+  decrypted or deserialized, and no class is loaded.
+- A secret key that is not a `com.sun.crypto.provider.SealedObjectForKeyProtector`,
+  uses serialization features Java does not write for sealed keys (enums, proxy
+  classes, externalizable objects, resets, or exceptions), or nests more than 32
+  levels deep is reported as an error.
+- Secret-key entries in a JKS file are an error, as they are in Java.
+
 ### PKCS12 compatibility
 
-- Java PKCS12 stores are supported with either current AES encryption or older
-  legacy encryption.
+- PKCS12 stores from Java, OpenSSL, and other tools are supported with either
+  current AES encryption or older legacy encryption. A store must have an
+  integrity MAC; PBMAC1 (RFC 9579) is not supported.
 - Unicode aliases are supported.
+- A key without a friendly name, as OpenSSL writes when not given `-name`, is
+  listed under the subject name (common name, else the full subject) of the
+  certificate sharing its local key ID, else as `Private key N`.
+- Certificates marked with Java's trusted-key-usage attribute are `Trusted
+  certificate` entries, named by their friendly name. A certificate without it
+  is listed as a `Certificate` entry unless it is part of a private key's
+  chain. Such an entry is named by its friendly name, else its subject name,
+  else `Certificate N`.
 - A verified store may still contain entries that cannot be read. In that case
   the readable entries are listed, along with a persistent warning that the list
   is incomplete.

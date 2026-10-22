@@ -4,6 +4,7 @@ mod entry_details;
 mod entry_list;
 mod export;
 mod file_picker;
+mod java_serialization;
 mod keystore;
 mod pkcs12;
 
@@ -485,7 +486,7 @@ impl App {
         } else {
             frame.render_widget(
                 Paragraph::new(
-                    "No keystore selected.\n\nPress o to open a keystore (.jks, .p12, .pfx) or a certificate file (.pem, .crt, .cer, .der, .p7b, .p7c).",
+                    "No keystore selected.\n\nPress o to open a keystore (.jks, .jceks, .p12, .pfx) or a certificate file (.pem, .crt, .cer, .der, .p7b, .p7c).",
                 )
                 .block(Block::bordered().title(" keystore-tui ".blue()))
                 .wrap(Wrap { trim: false }),
@@ -574,7 +575,7 @@ fn load(path: &Path) -> Result<Loaded, String> {
             .map(|store| Loaded::Store(Store::Pkcs12(store)))
             .map_err(|error| format!("{} is not a valid PKCS12 keystore: {error}", path.display()))
     };
-    if data.starts_with(&keystore::MAGIC.to_be_bytes()) {
+    if keystore::has_magic(&data) {
         jks(data, path)
     } else if certificate_file::is_pem(&data) {
         certificates()
@@ -591,9 +592,19 @@ fn load(path: &Path) -> Result<Loaded, String> {
 }
 
 fn jks(data: Vec<u8>, path: &Path) -> Result<Loaded, String> {
+    let format = if keystore::is_jceks(&data) {
+        "JCEKS"
+    } else {
+        "JKS"
+    };
     keystore::parse(data)
         .map(|store| Loaded::Store(Store::Jks(store)))
-        .map_err(|error| format!("{} is not a valid JKS keystore: {error}", path.display()))
+        .map_err(|error| {
+            format!(
+                "{} is not a valid {format} keystore: {error}",
+                path.display()
+            )
+        })
 }
 
 fn read_limited(path: &Path, limit: u64) -> io::Result<Vec<u8>> {

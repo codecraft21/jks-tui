@@ -75,3 +75,30 @@ cp trusted-cert.jks unicode-alias.jks
 keytool -changealias -keystore unicode-alias.jks -storetype JKS \
   -storepass changeit -alias root-cert -destalias 'certificate-😀'
 ```
+
+`trusted-cert.jceks` holds the same certificate under `root-cert` in a JCEKS
+store with the password `changeit`. JCEKS secret-key entries are built only in
+memory by tests, from synthetic bytes in the layout Java writes. Recreate the
+fixture with:
+
+```sh
+keytool -importkeystore -noprompt -srckeystore trusted-cert.jks \
+  -srcstoretype JKS -srcstorepass changeit -destkeystore trusted-cert.jceks \
+  -deststoretype JCEKS -deststorepass changeit
+```
+
+`openssl-cert.p12` and `openssl-cert-legacy.p12` are OpenSSL PKCS12 stores
+containing only that certificate, with the password `changeit`. They have no
+friendly names or Java trust attributes, as OpenSSL writes them. The first uses
+OpenSSL 3's default AES encryption and the second its legacy RC2 encryption.
+Recreate them with:
+
+```sh
+keytool -exportcert -rfc -alias root-cert -keystore trusted-cert.jks \
+  -storepass changeit -file fixture.pem
+openssl pkcs12 -export -nokeys -in fixture.pem -out openssl-cert.p12 \
+  -passout pass:changeit
+openssl pkcs12 -export -legacy -nokeys -in fixture.pem \
+  -out openssl-cert-legacy.p12 -passout pass:changeit
+rm fixture.pem
+```

@@ -161,8 +161,13 @@ fn entries(certificates: &[Vec<u8>]) -> Vec<KeystoreEntry> {
         .collect()
 }
 
-/// The subject common name, else the whole subject, else the file position.
+/// The subject name, else the file position.
 fn alias(index: usize, der: &[u8]) -> String {
+    subject_name(der).unwrap_or_else(|| format!("Certificate {}", index + 1))
+}
+
+/// The subject common name, else the whole subject, if either is non-empty.
+pub fn subject_name(der: &[u8]) -> Option<String> {
     Details::parse(der)
         .ok()
         .and_then(|info| {
@@ -171,7 +176,6 @@ fn alias(index: usize, der: &[u8]) -> String {
                 .or_else(|| Some(info.subject.to_string()))
         })
         .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| format!("Certificate {}", index + 1))
 }
 
 #[cfg(test)]
