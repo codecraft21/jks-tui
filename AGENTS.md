@@ -29,6 +29,7 @@ This file covers how the code is organised and how to work on it.
 | `src/certificate/details.rs` | Full certificate fields for the detail view |
 | `src/certificate/extensions.rs` | Decoding X.509 extensions into display lines |
 | `src/certificate/security.rs` | Weak key-size and signature-hash checks |
+| `src/certificate/signature.rs` | Checking a certificate's signature with its issuer's public key |
 | `src/entry_details.rs` | The full-screen detail view and the certificate hierarchy |
 | `src/export.rs` | The export name prompt and writing PEM/DER files |
 | `src/test_support.rs`, `src/tests.rs` | Unit-test helpers, synthetic keystores, and tests |
@@ -39,7 +40,8 @@ Dependencies are deliberately few:
 
 - `ratatui`, with the `crossterm` backend, for the UI.
 - `sha1` for the JKS and JCEKS integrity digest.
-- `crown` for ASN.1, PEM, X.509, PKCS#7, and PKCS12 (MAC and PBE).
+- `crown` for ASN.1, PEM, X.509, PKCS#7, PKCS12 (MAC and PBE), and signature
+  verification.
 - `zeroize` for wiping passwords.
 
 ## Development
@@ -69,7 +71,7 @@ To test a build in another location, pass
 
 The smoke tests use a generated public-certificate fixture with an empty
 password. They exercise opening a keystore, detail navigation, scrolling,
-fingerprints, extensions, resizing, and returning to the list. They also build a
+signature checks, fingerprints, extensions, resizing, and returning to the list. They also build a
 three-entry store at runtime from copies of that certificate to exercise
 filtering (including `q` typed into the filter and `Esc` cancelling it) and
 sorting. They also open a PEM certificate file and export it, checking that `q`

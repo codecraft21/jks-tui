@@ -196,11 +196,16 @@ class TerminalSmoke(unittest.TestCase):
                 app.send(b"\r")
                 app.expect("root-cert", "Expires")
                 app.send(b"\r")
-                app.expect("Certificate hierarchy", "Version: 3")
+                app.expect("Certificate hierarchy", "Version: 3", "[verified]")
                 app.send(b"\t")
                 app.expect("Certificate details [focused]")
                 app.send(b"\x1b[F")  # End scrolls to the fingerprint and extensions.
-                app.expect("Fingerprint (SHA-256)", "Extensions:", "Subject Key Identifier (2.5.29.14)")
+                app.expect(
+                    "Signature: verified with its own public key (self-signed).",
+                    "Fingerprint (SHA-256)",
+                    "Extensions:",
+                    "Subject Key Identifier (2.5.29.14)",
+                )
                 app.send(b"f")
                 app.expect("Fingerprint (SHA-1)")
                 app.send(b"\x1b[H")  # Home restores the top fields.

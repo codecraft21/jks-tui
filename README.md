@@ -13,7 +13,7 @@ opens standalone certificate files (`.pem`, `.crt`, `.cer`, `.der`, `.p7b`,
   bits, and MD2, MD5, or SHA-1 signatures.
 - Filters entries by alias or subject, and sorts them by alias or expiry date.
 - Shows each certificate's full details, including decoded extensions, and its
-  certificate hierarchy.
+  certificate hierarchy, with each signature checked against the issuer's key.
 - Exports a certificate or a whole chain to a new PEM or DER file.
 - Detects the format from the file content, so a PKCS12 store renamed `.jks`
   still opens.
@@ -109,6 +109,13 @@ and weak certificates are marked `[weak]` in the hierarchy. A self-signed
 certificate's own signature is not flagged, because a root is trusted for where
 it is stored rather than for its signature.
 
+Each certificate's signature is checked offline with the public key of the
+certificate above it in the hierarchy, or with its own key for a self-signed
+root. The hierarchy marks each certificate `[verified]` in green, `[bad
+signature]` in red, or `[unchecked]` when the issuer is not stored or the
+algorithm is not supported, such as brainpool or secp256k1 keys. The details
+explain the result below the signature algorithm.
+
 | Key | Action in the detail view |
 | --- | --- |
 | `Tab` / `Shift+Tab` | Switch focus between hierarchy and details |
@@ -121,7 +128,8 @@ it is stored rather than for its signature.
 | `q` / `Ctrl+C` | Quit |
 
 The hierarchy only shows certificates stored in the keystore. It does not fetch
-missing issuers or check whether a certificate is trusted.
+missing issuers or check whether a certificate is trusted: a verified signature
+only means the stored issuer's key made it, not that the chain is valid.
 
 ### Exporting certificates
 

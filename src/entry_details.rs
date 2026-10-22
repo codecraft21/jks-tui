@@ -17,6 +17,7 @@ use crate::{
     certificate::{
         self,
         details::{Details, fingerprint, time_text},
+        signature::{self, Signature},
     },
     export::{self, ExportPrompt, Outcome, Scope},
     keystore::KeystoreEntry,
@@ -42,6 +43,10 @@ pub struct EntryDetails {
     pub entry: usize,
     hierarchy: TableState,
     metadata: Vec<Option<Details>>,
+    /// Each certificate's signature checked with the next stored certificate,
+    /// or with its own key when it is the last and self-issued. `None` when
+    /// the issuer is not stored.
+    signatures: Vec<Option<Signature>>,
     details_focused: bool,
     sha1: bool,
     scroll: u16,
@@ -56,14 +61,34 @@ pub struct EntryDetails {
 
 impl EntryDetails {
     pub fn new(entry: usize, data: &KeystoreEntry, directory: PathBuf) -> Self {
+        let certificates = &data.certificates;
+        let metadata: Vec<_> = certificates
+            .iter()
+            .map(|der| Details::parse(der).ok())
+            .collect();
+        let signatures = (0..certificates.len())
+            .map(|index| {
+                let issuer = if index + 1 < certificates.len() {
+                    index + 1
+                } else if metadata[index]
+                    .as_ref()
+                    .is_some_and(|info| info.issuer == info.subject)
+                {
+                    index
+                } else {
+                    return None;
+                };
+                Some(signature::verify(
+                    &certificates[index],
+                    &certificates[issuer],
+                ))
+            })
+            .collect();
         Self {
             entry,
-            hierarchy: TableState::default().with_selected(data.certificates.len().checked_sub(1)),
-            metadata: data
-                .certificates
-                .iter()
-                .map(|der| Details::parse(der).ok())
-                .collect(),
+            hierarchy: TableState::default().with_selected(certificates.len().checked_sub(1)),
+            metadata,
+            signatures,
             details_focused: false,
             sha1: false,
             scroll: 0,
@@ -212,6 +237,7 @@ impl EntryDetails {
             for weakness in summary.iter().flat_map(|summary| &summary.weaknesses) {
                 lines.push(Line::from(format!("Weak: {weakness}.")).yellow());
             }
+            lines.push(self.signature_line(index));
             text = "\n".into();
         } else {
             text.push_str("Certificate could not be decoded.\n\n");
@@ -224,7 +250,9 @@ impl EntryDetails {
         if let Some(info) = &self.metadata[index] {
             text.push_str(&extensions_text(info));
         }
-        text.push_str("Stored certificates only; trust is not verified.");
+        text.push_str(
+            "Stored certificates only; signatures are checked within the chain, trust is not verified.",
+        );
         if entry.chain_warning.is_none()
             && self
                 .metadata
@@ -236,6 +264,32 @@ impl EntryDetails {
         }
         lines.extend(Text::from(text).lines);
         Text::from(lines)
+    }
+
+    /// The selected certificate's signature check, naming the key it used.
+    fn signature_line(&self, index: usize) -> Line<'static> {
+        let Some(result) = self.signatures[index] else {
+            return Line::from("Signature: not checked (the issuer certificate is not stored).");
+        };
+        let key = if index + 1 == self.metadata.len() {
+            "its own public key (self-signed)".to_string()
+        } else {
+            let issuer = self.metadata[index + 1]
+                .as_ref()
+                .map(|info| info.subject.to_string())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| format!("certificate {}", index + 2));
+            format!("the public key of {issuer}")
+        };
+        match result {
+            Signature::Verified => Line::from(format!("Signature: verified with {key}.")).green(),
+            Signature::Failed(reason) => {
+                Line::from(format!("Signature: does not verify with {key}: {reason}.")).red()
+            }
+            Signature::Unchecked(reason) => {
+                Line::from(format!("Signature: not checked ({reason})."))
+            }
+        }
     }
 
     pub fn draw(&mut self, frame: &mut Frame, entry: &KeystoreEntry) {
@@ -308,14 +362,17 @@ impl EntryDetails {
                         let weak = certificate::summarize(&entry.certificates[index])
                             .is_some_and(|summary| !summary.weaknesses.is_empty());
                         let indent = "  ".repeat(depth.min(8));
-                        Row::new([if weak {
-                            Line::from(vec![
-                                Span::raw(format!("{indent}{label} ")),
-                                Span::raw("[weak]").yellow(),
-                            ])
-                        } else {
-                            Line::from(format!("{indent}{label}"))
-                        }])
+                        let mut spans = vec![Span::raw(format!("{indent}{label}"))];
+                        if weak {
+                            spans.extend([Span::raw(" "), Span::raw("[weak]").yellow()]);
+                        }
+                        spans.push(Span::raw(" "));
+                        spans.push(match self.signatures[index] {
+                            Some(Signature::Verified) => Span::raw("[verified]").green(),
+                            Some(Signature::Failed(_)) => Span::raw("[bad signature]").red(),
+                            Some(Signature::Unchecked(_)) | None => Span::raw("[unchecked]"),
+                        });
+                        Row::new([Line::from(spans)])
                     });
             let table = Table::new(rows, [Constraint::Min(0)])
                 .block(tree_block)
@@ -525,6 +582,57 @@ mod tests {
         assert!(screen.contains("Fingerprint (SHA-256)"));
         view.handle_key(KeyCode::Up);
         assert!(draw(&mut view, &data, 100, 50).contains("Subject: CN=root"));
+    }
+
+    #[test]
+    fn hierarchy_marks_each_signature_check() {
+        use crate::test_support::ed25519_certificate;
+        let data = entry(vec![
+            ed25519_certificate("leaf", "intermediate", 3, 2),
+            ed25519_certificate("intermediate", "root", 2, 9),
+            ed25519_certificate("root", "root", 1, 1),
+        ]);
+        let mut view = EntryDetails::new(0, &data, PathBuf::new());
+        let screen = draw(&mut view, &data, 100, 50);
+        assert!(screen.contains("CN=root [verified]"));
+        assert!(screen.contains("CN=intermediate [bad signature]"));
+        assert!(screen.contains("CN=leaf [verified]"));
+        let line = |view: &EntryDetails| {
+            let text = view.text(&data, 0).to_string();
+            text.lines()
+                .find(|line| line.starts_with("Signature: "))
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(
+            line(&view),
+            "Signature: verified with the public key of CN=intermediate."
+        );
+        view.handle_key(KeyCode::Up);
+        assert_eq!(
+            line(&view),
+            "Signature: does not verify with the public key of CN=root: the issuer's public key did not make it."
+        );
+        view.handle_key(KeyCode::Up);
+        assert_eq!(
+            line(&view),
+            "Signature: verified with its own public key (self-signed)."
+        );
+
+        let lone = entry(vec![ed25519_certificate("leaf", "missing", 3, 2)]);
+        let mut view = EntryDetails::new(0, &lone, PathBuf::new());
+        assert!(draw(&mut view, &lone, 100, 50).contains("CN=leaf [unchecked]"));
+        assert!(
+            view.text(&lone, 0)
+                .to_string()
+                .contains("Signature: not checked (the issuer certificate is not stored).")
+        );
+        let unreadable = entry(vec![b"unreadable".to_vec(), data.certificates[2].clone()]);
+        let view = EntryDetails::new(0, &unreadable, PathBuf::new());
+        assert_eq!(
+            view.signatures[0],
+            Some(Signature::Unchecked("the certificate could not be decoded"))
+        );
     }
 
     #[test]

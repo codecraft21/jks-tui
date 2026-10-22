@@ -1,6 +1,7 @@
 pub mod details;
 pub mod extensions;
 pub mod security;
+pub mod signature;
 
 use crown::{
     asn1::{Asn1Time, Reader, der::Class, oid},
