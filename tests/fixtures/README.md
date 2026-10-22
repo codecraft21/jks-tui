@@ -102,3 +102,32 @@ openssl pkcs12 -export -legacy -nokeys -in fixture.pem \
   -out openssl-cert-legacy.p12 -passout pass:changeit
 rm fixture.pem
 ```
+
+`openssl-request.csr` is an OpenSSL PEM certificate signing request for
+`CN=keystore-tui test request`, with a 2048-bit RSA key and a Subject Alternative
+Name extension request. `openssl-ca-crl.pem` holds a self-signed EC P-256 CA
+certificate followed by a revocation list it signed, which revokes serial `0A`
+for key compromise. Both private keys are deleted after signing. Recreate them
+from this directory with:
+
+```sh
+work=$(mktemp -d)
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+  -keyout "$work/ca.key" -subj '/CN=keystore-tui test CA' -days 3650 \
+  -addext 'keyUsage=critical,keyCertSign,cRLSign' -out "$work/ca.pem"
+openssl req -new -newkey rsa:2048 -nodes -keyout "$work/request.key" \
+  -subj '/CN=keystore-tui test request' \
+  -addext 'subjectAltName=DNS:request.example.test' -out openssl-request.csr
+echo 1000 > "$work/crlnumber"
+printf 'R\t360101000000Z\t240101000000Z,keyCompromise\t0A\tunknown\t/CN=revoked\n' \
+  > "$work/index.txt"
+printf '[ca]\ndefault_ca = test\n[test]\ndatabase = %s/index.txt\ncrlnumber = %s/crlnumber\ndefault_md = sha256\ndefault_crl_days = 3650\n' \
+  "$work" "$work" > "$work/ca.cnf"
+openssl ca -config "$work/ca.cnf" -gencrl -keyfile "$work/ca.key" \
+  -cert "$work/ca.pem" -out "$work/crl.pem"
+cat "$work/ca.pem" "$work/crl.pem" > openssl-ca-crl.pem
+rm -r "$work"
+```
+
+Tests build other requests and revocation lists at runtime, signed with
+synthetic Ed25519 secrets.

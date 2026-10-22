@@ -316,6 +316,47 @@ class TerminalSmoke(unittest.TestCase):
                 app.send(exit_key)
                 app.assert_restored(self)
 
+    def requests_and_revocation_lists(self, exit_key):
+        fixtures = ROOT / "tests/fixtures"
+        with tempfile.TemporaryDirectory(prefix="terminal-check-", dir=ROOT / "target") as directory:
+            # The PEM bundle holds the CA certificate, then the list it signed.
+            Path(directory, "a-list.crl").write_bytes((fixtures / "openssl-ca-crl.pem").read_bytes())
+            Path(directory, "b-request.csr").write_bytes((fixtures / "openssl-request.csr").read_bytes())
+            with PtyApp(self.binary, directory) as app:
+                app.expect("No keystore selected", ".csr, .p10", ".crl")
+                app.send(b"o")
+                app.expect("a-list.crl", "b-request.csr")
+                app.send(b"\x1b[B\r")  # Skip the parent-directory row and open the list.
+                app.expect("Revocation list", "2 entries | Sort: alias")
+                app.send(b"\x1b[B\r")
+                app.expect("Revocation list: CN=keystore-tui test CA [verified]")
+                app.send(b"\t\x1b[F")  # Focus the details and scroll to the end.
+                app.expect(
+                    "CRL Number (2.5.29.20)",
+                    "Revoked Certificates: 1",
+                    "Serial Number: 0x0A (10)",
+                    "Key Compromise",
+                )
+                app.send(b"\x1b")
+                app.expect("2 entries | Sort: alias")
+                app.send(b"o")
+                app.expect("b-request.csr")
+                app.send(b"\x1b[B\x1b[B\r")
+                app.expect("keystore-tui test request", "Certificate request", "RSA", "2048 bits")
+                app.send(b"\r")
+                app.expect(
+                    "Request: CN=keystore-tui test request [verified]",
+                    "Signature: verified with its own public key (proof of possession).",
+                )
+                app.send(exit_key)
+                app.assert_restored(self)
+
+    def test_requests_and_revocation_lists_then_quit_restores_terminal(self):
+        self.requests_and_revocation_lists(b"q")
+
+    def test_requests_and_revocation_lists_then_ctrl_c_restores_terminal(self):
+        self.requests_and_revocation_lists(b"\x03")
+
     def test_certificate_file_export_then_quit_restores_terminal(self):
         self.certificate_file(b"q")
 

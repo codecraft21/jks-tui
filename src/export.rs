@@ -1,4 +1,5 @@
-//! Saving certificates to new PEM or DER files. Existing files are never replaced.
+//! Saving certificates, requests, and revocation lists to new PEM or DER
+//! files. Existing files are never replaced.
 use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
@@ -10,19 +11,10 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
-    /// The certificate selected in the hierarchy.
+    /// The certificate (or document) selected in the hierarchy.
     Certificate,
-    /// Every stored certificate of the entry, leaf first.
+    /// Every stored certificate of the entry, leaf (or document) first.
     Chain,
-}
-
-impl Scope {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Certificate => "certificate",
-            Self::Chain => "chain",
-        }
-    }
 }
 
 pub enum Outcome {
@@ -34,6 +26,8 @@ pub enum Outcome {
 /// The file name being typed for an export.
 pub struct ExportPrompt {
     pub scope: Scope,
+    /// What is saved, such as `certificate` or `chain`.
+    pub label: &'static str,
     pub path: String,
     directory: PathBuf,
 }
@@ -41,7 +35,7 @@ pub struct ExportPrompt {
 impl ExportPrompt {
     /// Suggests `<alias>.pem` (or `<alias>-chain.pem`) in `directory`, numbered
     /// to avoid names that already exist.
-    pub fn new(scope: Scope, directory: &Path, alias: &str) -> Self {
+    pub fn new(scope: Scope, label: &'static str, directory: &Path, alias: &str) -> Self {
         let mut stem: String = alias
             .chars()
             .map(|ch| {
@@ -67,6 +61,7 @@ impl ExportPrompt {
             .unwrap_or_else(|| directory.join(format!("{stem}.pem")));
         Self {
             scope,
+            label,
             path: path.to_string_lossy().into_owned(),
             directory: directory.to_path_buf(),
         }
@@ -98,22 +93,23 @@ pub fn is_der(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("der"))
 }
 
-/// PEM concatenates certificates in the given order; DER holds exactly one.
-pub fn encode(certificates: &[Vec<u8>], der: bool) -> Result<Vec<u8>, &'static str> {
-    match (der, certificates) {
-        (true, [certificate]) => Ok(certificate.clone()),
-        (true, _) => Err("A DER file holds one certificate; use a .pem name for the chain."),
-        (false, _) => Ok(certificates
+/// PEM concatenates the items in the given order, each under its PEM label;
+/// DER holds exactly one.
+pub fn encode(items: &[(&str, &[u8])], der: bool) -> Result<Vec<u8>, &'static str> {
+    match (der, items) {
+        (true, [(_, item)]) => Ok(item.to_vec()),
+        (true, _) => Err("A DER file holds one item; use a .pem name for the chain."),
+        (false, _) => Ok(items
             .iter()
-            .map(|certificate| pem::encode("CERTIFICATE", certificate))
+            .map(|(label, item)| pem::encode(label, item))
             .collect::<String>()
             .into_bytes()),
     }
 }
 
 /// Writes a new file, failing if `path` already exists.
-pub fn save(path: &Path, certificates: &[Vec<u8>]) -> Result<(), String> {
-    let data = encode(certificates, is_der(path))?;
+pub fn save(path: &Path, items: &[(&str, &[u8])]) -> Result<(), String> {
+    let data = encode(items, is_der(path))?;
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -146,18 +142,23 @@ mod tests {
     #[test]
     fn suggests_a_safe_unused_name_next_to_the_opened_file() {
         let directory = TestDirectory::new();
-        let prompt = ExportPrompt::new(Scope::Certificate, directory.path(), "my/key: 1");
+        let prompt = ExportPrompt::new(
+            Scope::Certificate,
+            "certificate",
+            directory.path(),
+            "my/key: 1",
+        );
         assert_eq!(
             Path::new(&prompt.path),
             directory.path().join("my_key__1.pem")
         );
         fs::write(directory.path().join("server-chain.pem"), b"existing").unwrap();
-        let prompt = ExportPrompt::new(Scope::Chain, directory.path(), "server");
+        let prompt = ExportPrompt::new(Scope::Chain, "chain", directory.path(), "server");
         assert_eq!(
             Path::new(&prompt.path),
             directory.path().join("server-chain-2.pem")
         );
-        let prompt = ExportPrompt::new(Scope::Certificate, directory.path(), "..");
+        let prompt = ExportPrompt::new(Scope::Certificate, "certificate", directory.path(), "..");
         assert_eq!(
             Path::new(&prompt.path),
             directory.path().join("certificate.pem")
@@ -167,7 +168,8 @@ mod tests {
     #[test]
     fn editing_resolves_relative_names_and_quit_letters_are_text() {
         let directory = TestDirectory::new();
-        let mut prompt = ExportPrompt::new(Scope::Certificate, directory.path(), "a");
+        let mut prompt =
+            ExportPrompt::new(Scope::Certificate, "certificate", directory.path(), "a");
         prompt.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         assert!(matches!(
             prompt.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -193,14 +195,16 @@ mod tests {
         let directory = TestDirectory::new();
         let leaf = metadata_certificate("leaf", "root", &[1], &[]);
         let root = metadata_certificate("root", "root", &[2], &[]);
-        let chain = [leaf.clone(), root.clone()];
+        let chain = [("CERTIFICATE", &leaf[..]), ("X509 CRL", &root[..])];
 
         let pem_path = directory.path().join("chain.PEM");
         save(&pem_path, &chain).unwrap();
         let blocks = pem::parse(&fs::read_to_string(&pem_path).unwrap()).unwrap();
-        assert_eq!(blocks.len(), 2);
-        assert!(blocks.iter().all(|block| block.label == "CERTIFICATE"));
-        assert_eq!([blocks[0].data.clone(), blocks[1].data.clone()], chain);
+        let saved: Vec<_> = blocks
+            .iter()
+            .map(|block| (block.label.as_str(), &block.data[..]))
+            .collect();
+        assert_eq!(saved, chain);
 
         let der_path = directory.path().join("leaf.DER");
         save(&der_path, &chain[..1]).unwrap();

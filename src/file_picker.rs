@@ -183,7 +183,7 @@ impl FilePicker {
             (error.as_str(), Color::Red)
         } else if !self.entries.iter().any(|entry| !entry.is_directory) {
             (
-                "No keystore (.jks, .jceks, .p12, .pfx) or certificate (.pem, .crt, .cer, .der, .p7b, .p7c) files in this directory.",
+                "No keystore (.jks, .jceks, .p12, .pfx), certificate (.pem, .crt, .cer, .der, .p7b, .p7c), request (.csr, .p10), or revocation list (.crl) files in this directory.",
                 Color::Gray,
             )
         } else {

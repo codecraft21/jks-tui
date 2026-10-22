@@ -15,7 +15,7 @@ use ratatui::{
 
 use crate::{
     certificate::{
-        self,
+        self, Summary,
         details::{Details, fingerprint, time_text},
         signature::{self, Signature},
     },
@@ -23,29 +23,53 @@ use crate::{
     keystore::KeystoreEntry,
 };
 
-/// An indented section; each extension's title is followed by its decoded values.
-fn extensions_text(info: &Details) -> String {
-    if info.extensions.is_empty() {
-        return "Extensions: None\n\n".into();
-    }
-    let mut text = String::from("Extensions:\n");
-    for extension in &info.extensions {
-        text.push_str(&format!("  {}\n", extension.title()));
-        for line in &extension.lines {
-            text.push_str(&format!("    {line}\n"));
-        }
-    }
-    text.push('\n');
-    text
+mod document;
+
+use document::{Document, extensions_text};
+
+/// The certificate fields up to the signature algorithm.
+fn certificate_fields(info: &Details, summary: Option<&Summary>, now: i64) -> Vec<Line<'static>> {
+    let public_key = summary.map_or_else(
+        || "Unavailable".into(),
+        |summary| format!("{} {}", summary.algorithm, summary.key_size_text()),
+    );
+    let mut lines = Text::from(format!(
+        "Version: {}\n\nSubject: {}\n\nIssuer: {}\n\nSerial Number (hex): {}\n\nSerial Number (dec): {}\n\nValid From: {}\n",
+        info.version, info.subject, info.issuer, info.serial_hex, info.serial_decimal,
+        time_text(&info.not_before),
+    ))
+    .lines;
+    let expiry = Span::raw(time_text(&info.not_after));
+    lines.push(Line::from(vec![
+        Span::raw("Valid Until: "),
+        if info.not_after.to_unix() < now {
+            expiry.red()
+        } else {
+            expiry
+        },
+    ]));
+    lines.extend(
+        Text::from(format!(
+            "\nPublic Key: {public_key}\n\nSignature Algorithm: {}",
+            info.signature_algorithm,
+        ))
+        .lines,
+    );
+    lines
 }
 
 pub struct EntryDetails {
     pub entry: usize,
     hierarchy: TableState,
+    /// Certificate fields; `None` for a document and unreadable certificates.
     metadata: Vec<Option<Details>>,
+    /// The entry-list fields of each hierarchy member.
+    summaries: Vec<Option<Summary>>,
+    /// The request or revocation list that is the first hierarchy member.
+    document: Option<Document>,
     /// Each certificate's signature checked with the next stored certificate,
-    /// or with its own key when it is the last and self-issued. `None` when
-    /// the issuer is not stored.
+    /// or with its own key when it is the last and self-issued. A request is
+    /// checked with its own key. `None` when the issuer is not stored.
     signatures: Vec<Option<Signature>>,
     details_focused: bool,
     sha1: bool,
@@ -62,12 +86,40 @@ pub struct EntryDetails {
 impl EntryDetails {
     pub fn new(entry: usize, data: &KeystoreEntry, directory: PathBuf) -> Self {
         let certificates = &data.certificates;
+        let document = data
+            .document
+            .zip(certificates.first())
+            .map(|(kind, der)| Document::parse(kind, der));
         let metadata: Vec<_> = certificates
             .iter()
-            .map(|der| Details::parse(der).ok())
+            .enumerate()
+            .map(|(index, der)| {
+                (index > 0 || document.is_none())
+                    .then(|| Details::parse(der).ok())
+                    .flatten()
+            })
+            .collect();
+        let summaries = certificates
+            .iter()
+            .enumerate()
+            .map(|(index, der)| match &document {
+                Some(document) if index == 0 => document.summary(),
+                _ => certificate::summarize(der),
+            })
             .collect();
         let signatures = (0..certificates.len())
             .map(|index| {
+                match &document {
+                    Some(Document::Request(_)) if index == 0 => {
+                        return Some(signature::verify_request(&certificates[0]));
+                    }
+                    Some(Document::RevocationList(_)) if index == 0 => {
+                        return certificates.get(1).map(|issuer| {
+                            signature::verify_revocation_list(&certificates[0], issuer)
+                        });
+                    }
+                    _ => {}
+                }
                 let issuer = if index + 1 < certificates.len() {
                     index + 1
                 } else if metadata[index]
@@ -88,6 +140,8 @@ impl EntryDetails {
             entry,
             hierarchy: TableState::default().with_selected(certificates.len().checked_sub(1)),
             metadata,
+            summaries,
+            document,
             signatures,
             details_focused: false,
             sha1: false,
@@ -115,21 +169,20 @@ impl EntryDetails {
                     self.message = None;
                 }
                 Outcome::Save(path) => {
-                    let scope = prompt.scope;
-                    let certificates = match scope {
-                        Scope::Certificate => self
-                            .selected_certificate()
-                            .map(|index| vec![entry.certificates[index].clone()])
-                            .unwrap_or_default(),
-                        Scope::Chain => entry.certificates.clone(),
+                    let label = prompt.label;
+                    let members: Vec<_> = match prompt.scope {
+                        Scope::Certificate => self.selected_certificate().into_iter().collect(),
+                        Scope::Chain => (0..entry.certificates.len()).collect(),
                     };
-                    match export::save(&path, &certificates) {
+                    let items: Vec<_> = members
+                        .into_iter()
+                        .map(|index| (self.pem_label(index), &entry.certificates[index][..]))
+                        .collect();
+                    match export::save(&path, &items) {
                         Ok(()) => {
                             self.export = None;
-                            self.message = Some((
-                                format!("Saved {} to '{}'.", scope.label(), path.display()),
-                                false,
-                            ));
+                            self.message =
+                                Some((format!("Saved {label} to '{}'.", path.display()), false));
                         }
                         // Keep the prompt open so the name can be corrected.
                         Err(error) => self.message = Some((error, true)),
@@ -142,16 +195,34 @@ impl EntryDetails {
         match key.code {
             KeyCode::Esc => return true,
             KeyCode::Char('x') | KeyCode::Char('X') if self.selected_certificate().is_some() => {
-                let scope = if key.code == KeyCode::Char('X') {
-                    Scope::Chain
+                let (scope, label) = if key.code == KeyCode::Char('X') {
+                    (Scope::Chain, "chain")
                 } else {
-                    Scope::Certificate
+                    match &self.document {
+                        Some(document) if self.selected_certificate() == Some(0) => {
+                            (Scope::Certificate, document.export_label())
+                        }
+                        _ => (Scope::Certificate, "certificate"),
+                    }
                 };
-                self.export = Some(ExportPrompt::new(scope, &self.directory, &entry.alias));
+                self.export = Some(ExportPrompt::new(
+                    scope,
+                    label,
+                    &self.directory,
+                    &entry.alias,
+                ));
             }
             code => self.handle_key(code),
         }
         false
+    }
+
+    /// The PEM label of a hierarchy member.
+    fn pem_label(&self, index: usize) -> &'static str {
+        match &self.document {
+            Some(document) if index == 0 => document.pem_label(),
+            _ => "CERTIFICATE",
+        }
     }
 
     /// The `metadata` and stored-certificate index selected in the hierarchy.
@@ -205,54 +276,45 @@ impl EntryDetails {
             text.push_str("No certificate is stored with this entry.");
             return Text::from(text);
         };
-        let mut lines = Vec::new();
-        if let Some(info) = &self.metadata[index] {
-            let summary = certificate::summarize(&entry.certificates[index]);
-            let public_key = summary.as_ref().map_or_else(
-                || "Unavailable".into(),
-                |summary| format!("{} {}", summary.algorithm, summary.key_size_text()),
-            );
-            text.push_str(&format!(
-                "Version: {}\n\nSubject: {}\n\nIssuer: {}\n\nSerial Number (hex): {}\n\nSerial Number (dec): {}\n\nValid From: {}\n\n",
-                info.version, info.subject, info.issuer, info.serial_hex, info.serial_decimal,
-                time_text(&info.not_before),
-            ));
-            lines.extend(Text::from(text).lines);
-            let expiry = Span::raw(time_text(&info.not_after));
-            lines.push(Line::from(vec![
-                Span::raw("Valid Until: "),
-                if info.not_after.to_unix() < now {
-                    expiry.red()
-                } else {
-                    expiry
-                },
-            ]));
-            lines.extend(
-                Text::from(format!(
-                    "\nPublic Key: {public_key}\n\nSignature Algorithm: {}\n",
-                    info.signature_algorithm,
-                ))
-                .lines,
-            );
+        let mut lines = Text::from(text).lines;
+        let summary = self.summaries[index].as_ref();
+        let (fields, noun) = match &self.document {
+            Some(document) if index == 0 => (document.fields(now), document.noun()),
+            _ => (
+                self.metadata[index].as_ref().map(|info| {
+                    (
+                        certificate_fields(info, summary, now),
+                        extensions_text("Extensions:", &info.extensions),
+                    )
+                }),
+                "Certificate",
+            ),
+        };
+        let mut text = String::new();
+        let sections = if let Some((fields, sections)) = fields {
+            lines.extend(fields);
             for weakness in summary.iter().flat_map(|summary| &summary.weaknesses) {
                 lines.push(Line::from(format!("Weak: {weakness}.")).yellow());
             }
             lines.push(self.signature_line(index));
-            text = "\n".into();
+            text.push('\n');
+            sections
         } else {
-            text.push_str("Certificate could not be decoded.\n\n");
-        }
+            text.push_str(&format!("{noun} could not be decoded.\n\n"));
+            String::new()
+        };
         text.push_str(&format!(
             "Fingerprint ({}): {}\n\n",
             if self.sha1 { "SHA-1" } else { "SHA-256" },
             fingerprint(&entry.certificates[index], self.sha1)
         ));
-        if let Some(info) = &self.metadata[index] {
-            text.push_str(&extensions_text(info));
-        }
-        text.push_str(
-            "Stored certificates only; signatures are checked within the chain, trust is not verified.",
-        );
+        text.push_str(&sections);
+        text.push_str(match &self.document {
+            Some(Document::Request(_)) => {
+                "Only the request's signature is checked; nothing it claims is verified."
+            }
+            _ => "Stored certificates only; signatures are checked within the chain, trust is not verified.",
+        });
         if entry.chain_warning.is_none()
             && self
                 .metadata
@@ -271,7 +333,9 @@ impl EntryDetails {
         let Some(result) = self.signatures[index] else {
             return Line::from("Signature: not checked (the issuer certificate is not stored).");
         };
-        let key = if index + 1 == self.metadata.len() {
+        let key = if index == 0 && matches!(self.document, Some(Document::Request(_))) {
+            "its own public key (proof of possession)".to_string()
+        } else if index + 1 == self.metadata.len() {
             "its own public key (self-signed)".to_string()
         } else {
             let issuer = self.metadata[index + 1]
@@ -352,14 +416,21 @@ impl EntryDetails {
                     .rev()
                     .enumerate()
                     .map(|(depth, (index, info))| {
-                        let label = info
+                        let label = match &self.document {
+                            Some(document) if index == 0 => document.name().map_or_else(
+                                || format!("{} (unreadable or unnamed)", document.noun()),
+                                |name| format!("{}: {name}", document.noun()),
+                            ),
+                            _ => info
+                                .as_ref()
+                                .map(|info| info.subject.to_string())
+                                .filter(|name| !name.is_empty())
+                                .unwrap_or_else(|| {
+                                    format!("Certificate {} (unreadable or unnamed)", index + 1)
+                                }),
+                        };
+                        let weak = self.summaries[index]
                             .as_ref()
-                            .map(|info| info.subject.to_string())
-                            .filter(|name| !name.is_empty())
-                            .unwrap_or_else(|| {
-                                format!("Certificate {} (unreadable or unnamed)", index + 1)
-                            });
-                        let weak = certificate::summarize(&entry.certificates[index])
                             .is_some_and(|summary| !summary.weaknesses.is_empty());
                         let indent = "  ".repeat(depth.min(8));
                         let mut spans = vec![Span::raw(format!("{indent}{label}"))];
@@ -418,7 +489,7 @@ impl EntryDetails {
         }
         if let Some(prompt) = &self.export {
             lines.push(Line::from(vec![
-                Span::raw(format!("Save {} to: ", prompt.scope.label())).bold(),
+                Span::raw(format!("Save {} to: ", prompt.label)).bold(),
                 Span::raw(format!("{}_", prompt.path)),
             ]));
             lines.push(Line::from(
@@ -434,7 +505,7 @@ impl EntryDetails {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::metadata_certificate;
+    use crate::{keystore, test_support::metadata_certificate};
     use crown::asn1::{der, oid::ObjectIdentifier};
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -445,6 +516,7 @@ mod tests {
             certificate: None,
             certificates,
             chain_warning: None,
+            document: None,
         }
     }
 
@@ -651,5 +723,192 @@ mod tests {
             draw(&mut view, &data, width, height);
         }
         assert!(draw(&mut view, &data, 40, 8).contains("Resize terminal"));
+    }
+
+    fn document_entry(document: keystore::Document, certificates: Vec<Vec<u8>>) -> KeystoreEntry {
+        KeystoreEntry {
+            document: Some(document),
+            ..entry(certificates)
+        }
+    }
+
+    #[test]
+    fn requests_show_attributes_requested_extensions_and_their_own_signature() {
+        use crate::test_support::ed25519_request;
+        let challenge = der::sequence(
+            &[
+                der::oid(&ObjectIdentifier::new(&[1, 2, 840, 113549, 1, 9, 7]).unwrap()),
+                der::set(&der::utf8_string("synthetic-challenge")),
+            ]
+            .concat(),
+        );
+        let san = der::sequence(
+            &[
+                der::oid(&ObjectIdentifier::new(&[2, 5, 29, 17]).unwrap()),
+                der::octet_string(&der::sequence(&der::implicit(2, false, b"example.test"))),
+            ]
+            .concat(),
+        );
+        let request_extensions = der::sequence(
+            &[
+                der::oid(&ObjectIdentifier::new(&[1, 2, 840, 113549, 1, 9, 14]).unwrap()),
+                der::set(&der::sequence(&san)),
+            ]
+            .concat(),
+        );
+        let data = document_entry(
+            keystore::Document::Request,
+            vec![ed25519_request("web", &[challenge, request_extensions], 5)],
+        );
+        let mut view = EntryDetails::new(0, &data, PathBuf::new());
+        assert!(draw(&mut view, &data, 100, 50).contains("Request: CN=web [verified]"));
+        let text = view.text(&data, 0).to_string();
+        for expected in [
+            "Subject: CN=web\n\nPublic Key: Ed25519 255 bits\n\nSignature Algorithm: Ed25519\nSignature: verified with its own public key (proof of possession).\n\nFingerprint (SHA-256): ",
+            "Attributes:\n  Challenge Password (1.2.840.113549.1.9.7)\n    Present; not shown\n\n",
+            "Requested Extensions:\n  Subject Alternative Name (2.5.29.17)\n    DNS: example.test\n\n",
+            "Only the request's signature is checked",
+        ] {
+            assert!(text.contains(expected), "{expected}");
+        }
+        assert!(!text.contains("synthetic-challenge"));
+        assert!(!text.contains("Issuer"));
+
+        let unreadable = document_entry(keystore::Document::Request, vec![b"junk".to_vec()]);
+        let mut view = EntryDetails::new(0, &unreadable, PathBuf::new());
+        let screen = draw(&mut view, &unreadable, 100, 50);
+        assert!(screen.contains("Request (unreadable or unnamed) [unchecked]"));
+        assert!(screen.contains("Request could not be decoded."));
+    }
+
+    #[test]
+    fn revocation_lists_show_entries_staleness_and_the_issuer_signature() {
+        use crate::test_support::{
+            ed25519_certificate, ed25519_revocation_list, revoked_certificate,
+        };
+        let reason = der::sequence(
+            &[
+                der::oid(&ObjectIdentifier::new(&[2, 5, 29, 21]).unwrap()),
+                der::octet_string(&der::tlv(der::Tag::universal(10), &[4])),
+            ]
+            .concat(),
+        );
+        let list = ed25519_revocation_list(
+            "root",
+            Some(1_000_000_000),
+            &[revoked_certificate(&[0x0a], &[reason])],
+            &[],
+            1,
+        );
+        let root = ed25519_certificate("root", "root", 1, 1);
+        let data = document_entry(
+            keystore::Document::RevocationList,
+            vec![list.clone(), root.clone()],
+        );
+        let mut view = EntryDetails::new(0, &data, PathBuf::new());
+        let screen = draw(&mut view, &data, 100, 50);
+        assert!(screen.contains("CN=root [verified]"));
+        assert!(screen.contains("  Revocation list: CN=root [verified]"));
+        let text = view.text(&data, 0).to_string();
+        for expected in [
+            "Issuer: CN=root\n\nThis Update: 2024-01-01 00:00:00 UTC\nNext Update: 2001-09-09 01:46:40 UTC\n\nSignature Algorithm: Ed25519\nSignature: verified with the public key of CN=root.",
+            "Extensions: None\n\nRevoked Certificates: 1\n  Serial Number: 0x0A (10)\n    Revoked: 2024-01-01 00:00:00 UTC\n    Reason Code (2.5.29.21)\n      Superseded\n\nStored certificates only",
+        ] {
+            assert!(text.contains(expected), "{expected}");
+        }
+        let mut terminal = Terminal::new(TestBackend::new(100, 50)).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    Paragraph::new(view.text(&data, 1_000_000_001)).wrap(Wrap { trim: false }),
+                    frame.area(),
+                );
+            })
+            .unwrap();
+        let red: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .filter(|cell| cell.fg == Color::Red)
+            .map(|cell| cell.symbol())
+            .collect();
+        assert_eq!(red, "2001-09-09 01:46:40 UTC");
+
+        let alone = document_entry(keystore::Document::RevocationList, vec![list]);
+        let mut view = EntryDetails::new(0, &alone, PathBuf::new());
+        assert!(draw(&mut view, &alone, 100, 50).contains("Revocation list: CN=root [unchecked]"));
+        assert!(
+            view.text(&alone, 0)
+                .to_string()
+                .contains("Signature: not checked (the issuer certificate is not stored).")
+        );
+    }
+
+    #[test]
+    fn long_revocation_lists_are_counted_but_not_all_listed() {
+        use crate::test_support::{ed25519_revocation_list, revoked_certificate};
+        let revoked: Vec<_> = (0..document::MAX_REVOKED_SHOWN + 2)
+            .map(|i| revoked_certificate(&(i as u32 + 1).to_be_bytes(), &[]))
+            .collect();
+        let data = document_entry(
+            keystore::Document::RevocationList,
+            vec![ed25519_revocation_list("root", None, &revoked, &[], 1)],
+        );
+        let view = EntryDetails::new(0, &data, PathBuf::new());
+        let text = view.text(&data, 0).to_string();
+        assert!(text.contains("Revoked Certificates: 5002\n"));
+        assert!(text.contains("(5000)\n"));
+        assert!(!text.contains("(5001)\n"));
+        assert!(text.contains("  2 more are not listed.\n"));
+    }
+
+    #[test]
+    fn exports_use_each_member_pem_label() {
+        use crate::test_support::{TestDirectory, ed25519_certificate, ed25519_revocation_list};
+        use crown::asn1::pem;
+        use ratatui::crossterm::event::KeyModifiers;
+        let directory = TestDirectory::new();
+        let list = ed25519_revocation_list("root", None, &[], &[], 1);
+        let root = ed25519_certificate("root", "root", 1, 1);
+        let data = KeystoreEntry {
+            alias: "ca".into(),
+            ..document_entry(
+                keystore::Document::RevocationList,
+                vec![list.clone(), root.clone()],
+            )
+        };
+        let mut view = EntryDetails::new(0, &data, directory.path().to_path_buf());
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        view.handle_event(key(KeyCode::Char('x')), &data);
+        assert!(draw(&mut view, &data, 100, 50).contains("Save revocation list to: "));
+        view.handle_event(key(KeyCode::Enter), &data);
+        assert_eq!(
+            view.message,
+            Some((
+                format!(
+                    "Saved revocation list to '{}'.",
+                    directory.path().join("ca.pem").display()
+                ),
+                false
+            ))
+        );
+        let saved =
+            pem::parse(&std::fs::read_to_string(directory.path().join("ca.pem")).unwrap()).unwrap();
+        assert_eq!(
+            (saved[0].label.as_str(), &saved[0].data),
+            ("X509 CRL", &list)
+        );
+        view.handle_event(key(KeyCode::Char('X')), &data);
+        view.handle_event(key(KeyCode::Enter), &data);
+        let saved =
+            pem::parse(&std::fs::read_to_string(directory.path().join("ca-chain.pem")).unwrap())
+                .unwrap();
+        let labels: Vec<_> = saved.iter().map(|block| block.label.as_str()).collect();
+        assert_eq!(labels, ["X509 CRL", "CERTIFICATE"]);
+        assert_eq!(saved[1].data, root);
+        view.handle_key(KeyCode::Up);
+        view.handle_event(key(KeyCode::Char('x')), &data);
+        assert!(draw(&mut view, &data, 100, 50).contains("Save certificate to: "));
     }
 }

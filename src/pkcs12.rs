@@ -151,6 +151,7 @@ impl Store {
                     certificate: leaf.and_then(certificate::summarize),
                     certificates,
                     chain_warning,
+                    document: None,
                 });
             }
         }
@@ -165,6 +166,7 @@ impl Store {
                             certificate: None,
                             certificates: vec![],
                             chain_warning: None,
+                            document: None,
                         });
                     } else {
                         incomplete = true;
@@ -200,6 +202,7 @@ impl Store {
                             certificate: certificate::summarize(der),
                             certificates,
                             chain_warning,
+                            document: None,
                         });
                         continue;
                     }
@@ -216,6 +219,7 @@ impl Store {
                                 certificate: certificate::summarize(der),
                                 certificates,
                                 chain_warning,
+                                document: None,
                             });
                         }
                     } else {
@@ -373,6 +377,7 @@ mod tests {
                     certificate: Some(fixture_summary()),
                     certificates: vec![fixture_certificate_der().to_vec()],
                     chain_warning: None,
+                    document: None,
                 }]
             );
             assert!(!verified.incomplete);
@@ -393,6 +398,7 @@ mod tests {
                     certificate: Some(fixture_summary()),
                     certificates: vec![fixture_certificate_der().to_vec()],
                     chain_warning: None,
+                    document: None,
                 }]
             );
             assert!(!verified.incomplete);
@@ -449,6 +455,7 @@ mod tests {
                     certificate: None,
                     certificates: vec![],
                     chain_warning: None,
+                    document: None,
                 },
                 KeystoreEntry {
                     alias: "secret".into(),
@@ -456,6 +463,7 @@ mod tests {
                     certificate: None,
                     certificates: vec![],
                     chain_warning: None,
+                    document: None,
                 },
             ]
         );
@@ -565,6 +573,7 @@ mod tests {
                     certificate: Some(fixture_summary()),
                     certificates: vec![fixture_certificate_der().to_vec()],
                     chain_warning: None,
+                    document: None,
                 }]
             );
             assert!(!verified.incomplete);

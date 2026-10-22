@@ -54,6 +54,31 @@ const KNOWN: &[(&[u64], &str, Decoder)] = &[
         "Authority Information Access",
         authority_information_access,
     ),
+    // Revocation list and revoked-entry extensions.
+    (&[2, 5, 29, 20], "CRL Number", crl_number),
+    (&[2, 5, 29, 21], "Reason Code", reason_code),
+    (&[2, 5, 29, 24], "Invalidity Date", invalidity_date),
+    (&[2, 5, 29, 27], "Delta CRL Indicator", crl_number),
+    (
+        &[2, 5, 29, 28],
+        "Issuing Distribution Point",
+        issuing_distribution_point,
+    ),
+    (&[2, 5, 29, 29], "Certificate Issuer", alternative_names),
+];
+
+const REASONS: [&str; 11] = [
+    "Unspecified",
+    "Key Compromise",
+    "CA Compromise",
+    "Affiliation Changed",
+    "Superseded",
+    "Cessation Of Operation",
+    "Certificate Hold",
+    "Reason 7",
+    "Remove From CRL",
+    "Privilege Withdrawn",
+    "AA Compromise",
 ];
 
 const KEY_USAGES: [&str; 9] = [
@@ -159,7 +184,7 @@ fn invalid() -> CryptoError {
 }
 
 /// Certificate strings could otherwise move the cursor or restyle the terminal.
-fn printable(text: &str) -> String {
+pub(super) fn printable(text: &str) -> String {
     text.chars()
         .map(|ch| {
             if ch.is_control() {
@@ -327,16 +352,7 @@ fn crl_distribution_points(value: &[u8]) -> CryptoResult<Vec<String>> {
         while !point.is_empty() {
             let (tag, content) = point.read_tlv()?;
             if tag == Tag::context_constructed(0) {
-                let mut name = Reader::new(content);
-                let (tag, content) = name.read_tlv()?;
-                name.expect_end()?;
-                if tag == Tag::context_constructed(0) {
-                    lines.extend(general_names(content)?);
-                } else if tag == Tag::context_constructed(1) {
-                    lines.push(format!("Relative name: {}", hex(content)));
-                } else {
-                    return Err(invalid());
-                }
+                lines.extend(distribution_point_name(content)?);
             } else if tag == Tag::context(1) {
                 lines.push(format!("Reasons: {}", hex(content)));
             } else if tag == Tag::context_constructed(2) {
@@ -348,6 +364,82 @@ fn crl_distribution_points(value: &[u8]) -> CryptoResult<Vec<String>> {
             } else {
                 return Err(invalid());
             }
+        }
+    }
+    Ok(lines)
+}
+
+/// A full name's general names, or a relative name in hex.
+fn distribution_point_name(content: &[u8]) -> CryptoResult<Vec<String>> {
+    let mut name = Reader::new(content);
+    let (tag, content) = name.read_tlv()?;
+    name.expect_end()?;
+    if tag == Tag::context_constructed(0) {
+        general_names(content)
+    } else if tag == Tag::context_constructed(1) {
+        Ok(vec![format!("Relative name: {}", hex(content))])
+    } else {
+        Err(invalid())
+    }
+}
+
+fn crl_number(value: &[u8]) -> CryptoResult<Vec<String>> {
+    let mut reader = Reader::new(value);
+    let number = reader.read_expected(der::INTEGER)?;
+    reader.expect_end()?;
+    if number.is_empty() {
+        return Err(invalid());
+    }
+    Ok(vec![serial_text(number, false)])
+}
+
+fn reason_code(value: &[u8]) -> CryptoResult<Vec<String>> {
+    let mut reader = Reader::new(value);
+    let code = reader.read_expected(Tag::universal(10))?; // ENUMERATED.
+    reader.expect_end()?;
+    match code {
+        [code] => {
+            Ok(vec![REASONS.get(usize::from(*code)).map_or_else(
+                || format!("Reason {code}"),
+                |name| (*name).into(),
+            )])
+        }
+        _ => Err(invalid()),
+    }
+}
+
+fn invalidity_date(value: &[u8]) -> CryptoResult<Vec<String>> {
+    let mut reader = Reader::new(value);
+    let date = reader.read_generalized_time()?;
+    reader.expect_end()?;
+    Ok(vec![super::details::time_text(&date)])
+}
+
+fn issuing_distribution_point(value: &[u8]) -> CryptoResult<Vec<String>> {
+    let mut point = single_sequence(value)?;
+    let mut lines = Vec::new();
+    while !point.is_empty() {
+        let (tag, content) = point.read_tlv()?;
+        let flag = match tag.number {
+            1 => "Only user certificates",
+            2 => "Only CA certificates",
+            4 => "Indirect CRL",
+            5 => "Only attribute certificates",
+            _ => "",
+        };
+        if tag == Tag::context_constructed(0) {
+            lines.extend(distribution_point_name(content)?);
+        } else if tag == Tag::context(3) {
+            lines.push(format!("Only some reasons: {}", hex(content)));
+        } else if tag == Tag::context(tag.number) && !flag.is_empty() {
+            let value = match content {
+                [0] => false,
+                [0xff] => true,
+                _ => return Err(invalid()),
+            };
+            lines.push(format!("{flag}: {value}"));
+        } else {
+            return Err(invalid());
         }
     }
     Ok(lines)
@@ -665,5 +757,62 @@ mod tests {
             ]
         );
         assert_truncations_fail(certificate_policies, &value);
+    }
+
+    #[test]
+    fn revocation_list_and_entry_extensions() {
+        let enumerated = |code: u8| der::tlv(Tag::universal(10), &[code]);
+        assert_eq!(crl_number(&der::integer_i64(300)).unwrap(), ["300"]);
+        assert_eq!(reason_code(&enumerated(1)).unwrap(), ["Key Compromise"]);
+        assert_eq!(reason_code(&enumerated(10)).unwrap(), ["AA Compromise"]);
+        assert_eq!(reason_code(&enumerated(42)).unwrap(), ["Reason 42"]);
+        let date = crown::asn1::Asn1Time::new(2024, 5, 6, 7, 8, 9, false).unwrap();
+        assert_eq!(
+            invalidity_date(&der::generalized_time(&date)).unwrap(),
+            ["2024-05-06 07:08:09 UTC"]
+        );
+        let point = der::sequence(
+            &[
+                der::implicit(
+                    0,
+                    true,
+                    &der::implicit(0, true, &ia5(6, "http://crl.example.test/ca.crl")),
+                ),
+                der::implicit(2, false, &[0xff]),
+                der::implicit(3, false, &[0x06, 0x40]),
+                der::implicit(4, false, &[0]),
+            ]
+            .concat(),
+        );
+        assert_eq!(
+            issuing_distribution_point(&point).unwrap(),
+            [
+                "URI: http://crl.example.test/ca.crl",
+                "Only CA certificates: true",
+                "Only some reasons: 06:40",
+                "Indirect CRL: false",
+            ]
+        );
+        assert!(
+            issuing_distribution_point(&der::sequence(&der::implicit(1, false, &[1]))).is_err()
+        );
+        assert!(
+            issuing_distribution_point(&der::sequence(&der::implicit(6, false, &[0]))).is_err()
+        );
+        assert!(crl_number(&der::tlv(der::INTEGER, &[])).is_err());
+        for (decode, value) in [
+            (crl_number as Decoder, der::integer_i64(300)),
+            (reason_code, enumerated(1)),
+            (invalidity_date, der::generalized_time(&date)),
+            (issuing_distribution_point, point),
+        ] {
+            assert_truncations_fail(decode, &value);
+        }
+        let issuer = Extension::parse(&extension(
+            &[2, 5, 29, 29],
+            &der::sequence(&ia5(2, "ca.example.test")),
+        ));
+        assert_eq!(issuer.title(), "Certificate Issuer (2.5.29.29)");
+        assert_eq!(issuer.lines, ["DNS: ca.example.test"]);
     }
 }

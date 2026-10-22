@@ -21,6 +21,8 @@ document, and also the README if users will notice.
   - [Weak cryptography](#weak-cryptography)
   - [Extensions](#extensions)
   - [Certificate hierarchy](#certificate-hierarchy)
+  - [Signature checks](#signature-checks)
+  - [Requests and revocation lists](#requests-and-revocation-lists)
   - [Exporting](#exporting)
   - [Small terminals](#small-terminals)
 - [Visual style](#visual-style)
@@ -28,10 +30,11 @@ document, and also the README if users will notice.
 
 ## Scope
 
-- The app reads Java KeyStore (JKS), JCEKS, and PKCS12 files, and standalone
-  certificate files. It never writes or modifies them.
-- The only files it writes are new certificate exports; see
-  [Exporting](#exporting).
+- The app reads Java KeyStore (JKS), JCEKS, and PKCS12 files, standalone
+  certificate files, PKCS#10 certificate signing requests, and X.509
+  certificate revocation lists. It never writes or modifies them.
+- The only files it writes are new exports; see [Exporting](#exporting).
+- Requests and revocation lists are only viewed, never created or signed.
 - It runs without Java or `keytool` installed.
 - Private keys are never decrypted, displayed, or exported.
 - The following are out of scope for now: import, keystore editing, raw ASN.1
@@ -42,8 +45,8 @@ document, and also the README if users will notice.
 - The browser starts in the working directory. If a keystore is open, it starts
   in that keystore's directory.
 - It lists directories, then files whose extension is `.jks`, `.jceks`, `.p12`,
-  `.pfx`, `.pem`, `.crt`, `.cer`, `.der`, `.p7b`, or `.p7c`
-  (case-insensitive). Directories come first.
+  `.pfx`, `.pem`, `.crt`, `.cer`, `.der`, `.p7b`, `.p7c`, `.csr`, `.p10`, or
+  `.crl` (case-insensitive). Directories come first.
 - A `../` entry leads to the parent directory. Selection wraps at both ends, and
   `../` takes part in the wrap.
 - Cancelling the browser keeps the keystore that was already loaded.
@@ -55,7 +58,8 @@ document, and also the README if users will notice.
   1. The JKS magic number means JKS, and the JCEKS magic number means JCEKS.
   2. A PEM `-----BEGIN ` line means a certificate file.
   3. Otherwise a `.p12` or `.pfx` name means PKCS12, and a certificate-file
-     extension means a DER certificate or PKCS#7 bundle.
+     extension (including `.csr`, `.p10`, and `.crl`) means a DER certificate,
+     request, revocation list, or PKCS#7 bundle.
   4. Other DER content is tried as a certificate file, then as PKCS12.
   5. Anything else is read as JKS, so its error describes a JKS file.
 - **JKS and JCEKS:** the header, lengths, counts, and structure are checked
@@ -115,17 +119,25 @@ document, and also the README if users will notice.
 - Accepted forms:
   - PEM blocks labelled `CERTIFICATE`, `X509 CERTIFICATE`, or `TRUSTED
     CERTIFICATE` (OpenSSL's trust settings after the certificate are ignored)
+  - PEM blocks labelled `CERTIFICATE REQUEST` or `NEW CERTIFICATE REQUEST`
+    (PKCS#10 requests)
+  - PEM blocks labelled `X509 CRL` (revocation lists)
   - PEM `PKCS7` or `CMS` blocks, and DER PKCS#7 SignedData; their X.509
-    certificates are listed and anything else in them is ignored
-  - a single DER certificate, which must be one complete DER element
+    certificates, then their revocation lists, are listed and anything else in
+    them is ignored
+  - a single DER certificate, request, or revocation list, which must be one
+    complete DER element; it is tried in that order
 - Text outside PEM blocks is ignored. Other PEM blocks, such as private keys,
   are not decoded; a persistent yellow warning says some were skipped.
-- A malformed PEM block, invalid Base64, or a file without any certificate is
-  an error. A certificate inside a PEM block that cannot be decoded is still
-  listed, as for keystores.
-- Each certificate is one entry of type `Certificate`, listed in file order
-  (the alias sort keeps that order). The alias is the subject common name, else
-  the whole subject, else `Certificate N` for its position in the file.
+- A malformed PEM block, invalid Base64, or a file with no certificate,
+  request, or revocation list is an error. A certificate, request, or list
+  inside a PEM block that cannot be decoded is still listed, as for keystores.
+- Each certificate is one entry of type `Certificate`, each request one of type
+  `Certificate request`, and each list one of type `Revocation list`, all in
+  file order (the alias sort keeps that order). The alias is the subject common
+  name, else the whole subject, else `Certificate N`, `Request N`, or
+  `Revocation list N` for its position in the file. A revocation list is named
+  by its issuer in the same way.
 
 ## Password prompt
 
@@ -147,7 +159,13 @@ document, and also the README if users will notice.
 - For a private-key entry, the certificate used for the columns is the first one
   in its chain. In PKCS12, that is the certificate that shares the key's local
   key ID.
-- Secret keys and unreadable certificates show `-` in the certificate columns.
+- Secret keys and unreadable certificates, requests, and revocation lists show
+  `-` in the certificate columns.
+- A request shows its own public key and `-` as its expiry.
+- A revocation list shows `-` as its algorithm and key size, and its next
+  update as its expiry (`-` without one). It turns red once the next update has
+  passed, but is never yellow: lists are reissued shortly before their next
+  update. Expiry sorting uses the next update.
 - An unrecognized algorithm is shown as its OID.
 - Key size means the modulus size for RSA and DSA, and the curve size for EC.
 - Expiry dates are in UTC. They are yellow when the certificate expires within
@@ -168,8 +186,9 @@ document, and also the README if users will notice.
 
 - `/` starts typing a filter, or resumes editing the applied one.
 - The filter is a case-insensitive substring match against the alias and the
-  certificate subject distinguished name (for example `CN=example`). An entry
-  whose subject cannot be decoded matches on its alias only.
+  certificate subject distinguished name (for example `CN=example`); for a
+  revocation list, its issuer. An entry whose subject cannot be decoded matches
+  on its alias only.
 - The list updates as the filter is typed. While typing, every character
   without `Ctrl` or `Alt` goes into the filter, including `q`, `s`, `o`, `j`,
   and `k`. `Up` / `Down` still move the selection, `Backspace` deletes a
@@ -214,6 +233,8 @@ document, and also the README if users will notice.
 - Long values wrap and can be scrolled. Switching certificates resets the detail
   scroll position.
 - An entry without certificates still opens, with an explanation.
+- Requests and revocation lists open the same view with their own fields; see
+  [Requests and revocation lists](#requests-and-revocation-lists).
 - If one certificate in a chain cannot be read, the other chain members are
   still shown.
 
@@ -226,6 +247,8 @@ document, and also the README if users will notice.
 - The signature of a self-signed certificate (issuer and subject encoded
   identically) is not checked: a root is trusted for where it is stored, not
   for its signature. Its key size is still checked.
+- A request is signed with its own key, so only its key size is checked. A
+  revocation list has no key of its own, so only its signature is checked.
 - Keys of unknown size, unrecognized algorithms, and other signature algorithms
   are not flagged. This check reads only the stored fields; signatures are
   checked separately, see [Signature checks](#signature-checks).
@@ -249,6 +272,11 @@ document, and also the README if users will notice.
   | CRL Distribution Points | Distribution point names (usually URIs) and CRL issuers; reasons and relative names in hex |
   | Authority Information Access | OCSP and CA Issuers locations |
   | Certificate Policies | Policy OIDs, naming `anyPolicy` and the CA/Browser Forum validation levels; qualifiers are not shown |
+  | CRL Number / Delta CRL Indicator | The number in decimal |
+  | Issuing Distribution Point | Distribution point names, the `Only user certificates`, `Only CA certificates`, `Indirect CRL`, and `Only attribute certificates` flags; reasons and relative names in hex |
+  | Reason Code | The named reason (Key Compromise, Superseded, ...); unknown codes as `Reason N` |
+  | Invalidity Date | The date in UTC |
+  | Certificate Issuer | General names, as for alternative names |
 
 - Other extensions show their OID and `Value:` in hex. Hex is colon-separated
   uppercase, as for fingerprints.
@@ -269,7 +297,9 @@ document, and also the README if users will notice.
 - **Certificate files:** each entry's chain follows issuer names to the first
   certificate in the same file with that subject. Names are compared by their
   decoded text, ignoring case. The chain stops at a self-issued certificate, a
-  missing issuer, or a certificate already in the chain.
+  missing issuer, or a certificate already in the chain. A revocation list's
+  hierarchy is the list, below the chain of the first certificate whose subject
+  is the list's issuer. A request's hierarchy is the request alone.
 - The app never fetches certificates and never verifies trust.
 
 ### Signature checks
@@ -291,21 +321,63 @@ document, and also the README if users will notice.
   | Failed | `[bad signature]`, red | `does not verify with ...: <reason>.`, red |
   | Unchecked | `[unchecked]` | `not checked (<reason>).` |
 
+- A revocation list's signature is checked with the public key of the
+  certificate above it, its issuer; without one it is not checked. A request's
+  signature is checked with its own public key, and the details say
+  `verified with its own public key (proof of possession).`: this shows only
+  that the requester holds the matching private key.
 - A signature fails when the signature algorithm inside the signed part differs
-  from the one outside it, when the issuer's key type cannot make that kind of
-  signature, or when the signature does not match the signed bytes.
-- A signature is unchecked when the issuer is not stored, when either
-  certificate cannot be decoded, or when the signature algorithm or the issuer's
+  from the one outside it, when the key type cannot make that kind of
+  signature, or when the signature does not match the signed bytes. Requests
+  have no inner algorithm to compare.
+- A signature is unchecked when the issuer is not stored, when the signed
+  object or its issuer cannot be decoded, or when the signature algorithm or the
   key type is not supported.
 - Supported signatures include RSA PKCS#1 v1.5, RSASSA-PSS made by RSA keys,
   ECDSA on P-256, P-384, and P-521, DSA, Ed25519, and Ed448. Keys of type
   RSASSA-PSS, brainpool curves, and secp256k1 are not supported.
 
+### Requests and revocation lists
+
+- The request or list is the bottom row of the hierarchy, labelled
+  `Request: <subject>` or `Revocation list: <issuer>`, or `Request (unreadable
+  or unnamed)` and `Revocation list (unreadable or unnamed)`. It is selected
+  when the view opens. A list's issuer chain is above it.
+- A request's fields:
+  - version
+  - subject
+  - public key algorithm and size
+  - signature algorithm, any weakness, and the signature check
+  - fingerprint, as for certificates
+  - "Attributes:" with each attribute's name and OID and its values. A
+    challenge password is shown as `Present; not shown`, never its value.
+    Unstructured names are shown as text, and other attributes in hex.
+  - "Requested Extensions:", decoded as certificate extensions are; see
+    [Extensions](#extensions). They come from the PKCS#9 extension request
+    attribute or Microsoft's older form of it; a malformed one is listed with
+    the attributes in hex.
+- A revocation list's fields:
+  - version
+  - issuer
+  - this update and next update, in UTC (`None` without a next update). The
+    next update turns red once it has passed.
+  - signature algorithm, any weakness, and the signature check
+  - fingerprint, as for certificates
+  - extensions; see [Extensions](#extensions)
+  - "Revoked Certificates:" with their count, then each one's serial number
+    (hexadecimal, with decimal in brackets), revocation date in UTC, and entry
+    extensions, such as the reason code. Only the first 5,000 are listed; a line
+    says how many more there are.
+- Neither a request's claims nor a list's revocations are checked against
+  anything, and revocation is never looked up for certificates.
+
 ### Exporting
 
-- `x` exports the certificate selected in the hierarchy; `X` exports every
-  certificate stored with the entry, leaf first. Neither does anything for an
-  entry without certificates.
+- `x` exports the certificate, request, or revocation list selected in the
+  hierarchy; `X` exports every member of the hierarchy, leaf (or request or
+  list) first. Neither does anything for an entry without certificates. The
+  prompt and the success message name what is saved (`certificate`,
+  `request`, `revocation list`, or `chain`).
 - A prompt replaces the detail shortcuts. It suggests `<alias>.pem` or
   `<alias>-chain.pem` in the open file's directory. Characters other than
   letters, digits, `-`, `_`, and `.` in the alias become `_`, and a name that
@@ -315,9 +387,10 @@ document, and also the README if users will notice.
   `Ctrl+U` clears the name, `Enter` saves, and `Esc` cancels without leaving the
   detail view. `Ctrl+C` still quits.
 - A relative name is resolved against the open file's directory.
-- A `.der` name (case-insensitive) saves one certificate as raw DER; a chain
-  cannot be saved as DER. Any other name saves PEM `CERTIFICATE` blocks with
-  64-character lines. The certificates are written byte for byte as stored.
+- A `.der` name (case-insensitive) saves one item as raw DER; a chain cannot be
+  saved as DER. Any other name saves PEM blocks with 64-character lines,
+  labelled `CERTIFICATE`, `CERTIFICATE REQUEST`, or `X509 CRL`. Items are
+  written byte for byte as stored.
 - The file must not exist yet; it is never replaced. On success a green message
   names the saved file and the prompt closes. On failure a red message explains
   why and the prompt stays open to correct the name. The message clears on the

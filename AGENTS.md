@@ -1,7 +1,8 @@
 # Agent and contributor guide
 
 keystore-tui is a small, read-only Rust and Ratatui TUI for inspecting JKS,
-JCEKS, and PKCS12 keystores and standalone certificate files. [`README.md`](README.md) describes the app from the user's
+JCEKS, and PKCS12 keystores, standalone certificate files, certificate signing
+requests, and revocation lists. [`README.md`](README.md) describes the app from the user's
 point of view. [`docs/SPEC.md`](docs/SPEC.md) specifies its detailed behaviour.
 This file covers how the code is organised and how to work on it.
 
@@ -19,7 +20,7 @@ This file covers how the code is organised and how to work on it.
 | Module | Responsibility |
 | --- | --- |
 | `src/main.rs` | App state, event loop, main view rendering, password prompt, file loading (size limit, format detection), terminal setup and restoration |
-| `src/certificate_file.rs` | PEM, DER, and PKCS#7 certificate files, and chain linking within a file |
+| `src/certificate_file.rs` | PEM, DER, and PKCS#7 certificate files (including requests and revocation lists), and chain linking within a file |
 | `src/file_picker.rs` | The keystore file browser |
 | `src/keystore.rs` | JKS and JCEKS parsing and integrity check (SHA-1); the shared `KeystoreEntry` model |
 | `src/java_serialization.rs` | Skipping a serialized Java object (a JCEKS secret key) without deserializing it |
@@ -29,8 +30,11 @@ This file covers how the code is organised and how to work on it.
 | `src/certificate/details.rs` | Full certificate fields for the detail view |
 | `src/certificate/extensions.rs` | Decoding X.509 extensions into display lines |
 | `src/certificate/security.rs` | Weak key-size and signature-hash checks |
-| `src/certificate/signature.rs` | Checking a certificate's signature with its issuer's public key |
+| `src/certificate/request.rs` | PKCS#10 certificate request fields |
+| `src/certificate/revocation.rs` | Revocation list fields and revoked certificates |
+| `src/certificate/signature.rs` | Checking the signature of a certificate or revocation list with its issuer's public key, and of a request with its own |
 | `src/entry_details.rs` | The full-screen detail view and the certificate hierarchy |
+| `src/entry_details/document.rs` | Detail text for requests and revocation lists |
 | `src/export.rs` | The export name prompt and writing PEM/DER files |
 | `src/test_support.rs`, `src/tests.rs` | Unit-test helpers, synthetic keystores, and tests |
 | `tests/terminal_smoke.py` | PTY smoke tests against the built binary |
@@ -75,7 +79,8 @@ signature checks, fingerprints, extensions, resizing, and returning to the list.
 three-entry store at runtime from copies of that certificate to exercise
 filtering (including `q` typed into the filter and `Esc` cancelling it) and
 sorting. They also open a PEM certificate file and export it, checking that `q`
-is typed into the export name and `Esc` cancels the prompt. They check that `q`,
+is typed into the export name and `Esc` cancels the prompt, and open an OpenSSL
+revocation list and certificate request and check their details. They check that `q`,
 `Esc`, and `Ctrl+C` (including while typing a filter) restore terminal modes, leave the alternate screen, and show the cursor
 again.
 
@@ -105,7 +110,7 @@ runtime from synthetic bytes, so no private key is ever committed.
   real keystores out of logs, test output, and commits. Wipe password buffers
   after use.
 - **Read-only:** the app never writes keystores and never decrypts private keys.
-  Certificate exports only ever create new files.
+  Exports only ever create new files.
 
 ## Documentation
 

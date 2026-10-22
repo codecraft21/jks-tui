@@ -222,7 +222,7 @@ fn pkcs12_renamed_as_jks_opens_after_password_verification() {
 fn entry_list_shows_certificate_algorithm_key_size_and_expiry() {
     let mut app = App::default();
     let expired = Summary {
-        not_after: Asn1Time::new(2001, 2, 3, 0, 0, 0, true).unwrap(),
+        not_after: Some(Asn1Time::new(2001, 2, 3, 0, 0, 0, true).unwrap()),
         ..fixture_summary()
     };
     app.show_entries(
@@ -234,6 +234,7 @@ fn entry_list_shows_certificate_algorithm_key_size_and_expiry() {
                 certificate: Some(fixture_summary()),
                 certificates: vec![],
                 chain_warning: None,
+                document: None,
             },
             KeystoreEntry {
                 alias: "expired".into(),
@@ -241,6 +242,7 @@ fn entry_list_shows_certificate_algorithm_key_size_and_expiry() {
                 certificate: Some(expired),
                 certificates: vec![],
                 chain_warning: None,
+                document: None,
             },
             KeystoreEntry {
                 alias: "secret".into(),
@@ -248,6 +250,7 @@ fn entry_list_shows_certificate_algorithm_key_size_and_expiry() {
                 certificate: None,
                 certificates: vec![],
                 chain_warning: None,
+                document: None,
             },
         ],
     );
@@ -344,6 +347,7 @@ fn partial_pkcs12_warning_persists_with_entries() {
                 certificate: None,
                 certificates: vec![],
                 chain_warning: None,
+                document: None,
             }],
             incomplete: true,
         },
@@ -485,7 +489,7 @@ fn empty_directories_and_small_terminals_are_handled() {
     let directory = TestDirectory::new();
     let mut app = browsing(directory.path());
     assert!(
-        screen(&mut app, 100, 24).contains("No keystore (.jks, .jceks, .p12, .pfx) or certificate")
+        screen(&mut app, 100, 24).contains("No keystore (.jks, .jceks, .p12, .pfx), certificate")
     );
     press(&mut app, KeyCode::Up);
     press(&mut app, KeyCode::Down);
@@ -657,6 +661,7 @@ fn entry_list_scrolls_to_entries_below_the_viewport() {
                 certificate: None,
                 certificates: vec![],
                 chain_warning: None,
+                document: None,
             })
             .collect(),
     );
@@ -766,6 +771,7 @@ fn enter_opens_full_screen_details_and_escape_preserves_list_state() {
                 certificate: Some(fixture_summary()),
                 certificates: certificates.clone(),
                 chain_warning: None,
+                document: None,
             })
             .collect(),
     );
@@ -825,6 +831,7 @@ fn enter_handles_empty_lists_and_entries_without_certificates() {
             certificate: None,
             certificates: vec![],
             chain_warning: None,
+            document: None,
         }],
     );
     press(&mut app, KeyCode::Enter);
@@ -840,11 +847,12 @@ fn certificate_entry(alias: &str, not_after: Asn1Time) -> KeystoreEntry {
         alias: alias.into(),
         kind: "Trusted certificate",
         certificate: Some(Summary {
-            not_after,
+            not_after: Some(not_after),
             ..fixture_summary()
         }),
         certificates: vec![test_support::fixture_certificate_der().to_vec()],
         chain_warning: None,
+        document: None,
     }
 }
 
@@ -862,6 +870,7 @@ fn triage_app() -> App {
                 certificate: None,
                 certificates: vec![],
                 chain_warning: None,
+                document: None,
             },
             certificate_entry("zeta", date(2030)),
         ],
@@ -1018,7 +1027,7 @@ fn expiring_soon_dates_use_a_readable_warning_color() {
         .as_secs() as i64;
     let soon = Asn1Time::from_unix(now + 10 * 24 * 60 * 60, false);
     let soon_text = Summary {
-        not_after: soon,
+        not_after: Some(soon),
         ..fixture_summary()
     }
     .expiry_text();
@@ -1109,14 +1118,68 @@ fn certificate_files_open_without_a_prompt_in_file_order() {
 }
 
 #[test]
+fn requests_and_revocation_lists_open_as_entries() {
+    use crown::asn1::pem;
+    let directory = TestDirectory::new();
+    let root = test_support::ed25519_certificate("root", "root", 1, 1);
+    let request = test_support::ed25519_request("web", &[], 5);
+    let stale = test_support::ed25519_revocation_list("root", Some(1_000_000_000), &[], &[], 1);
+    let bundle = directory.path().join("bundle.pem");
+    let text = [
+        pem::encode("CERTIFICATE REQUEST", &request),
+        pem::encode("X509 CRL", &stale),
+        pem::encode("CERTIFICATE", &root),
+    ]
+    .concat();
+    fs::write(&bundle, text).unwrap();
+
+    let mut app = App::default();
+    app.open_file(bundle);
+    assert!(app.error.is_none() && app.warning.is_none());
+    assert_eq!(shown_aliases(&app), ["web", "root", "root"]);
+    assert_eq!(app.entries[1].certificates, [stale.clone(), root.clone()]);
+    let rendered = screen(&mut app, 120, 24);
+    assert!(rendered.contains("Certificate request"));
+    assert!(rendered.contains("Revocation list"));
+    // A stale list's next update is red, like an expiry date.
+    assert_eq!(red_text(&mut app), "2001-09-09");
+    press(&mut app, KeyCode::Enter);
+    let details = screen(&mut app, 120, 50);
+    assert!(details.contains("Request: CN=web [verified]"));
+    assert!(details.contains("Signature: verified with its own public key (proof of possession)."));
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+    let details = screen(&mut app, 120, 50);
+    assert!(details.contains("Revocation list: CN=root [verified]"));
+    assert!(details.contains("Signature: verified with the public key of CN=root."));
+    assert!(details.contains("Revoked Certificates: None"));
+
+    // DER files are recognised by content, whatever their name.
+    for (name, data, kind) in [
+        ("request.der", &request, "Certificate request"),
+        ("list", &stale, "Revocation list"),
+    ] {
+        let path = directory.path().join(name);
+        fs::write(&path, data).unwrap();
+        app.open_file(path);
+        assert!(app.error.is_none(), "{name}");
+        assert_eq!(app.entries.len(), 1);
+        assert_eq!(app.entries[0].kind, kind);
+    }
+}
+
+#[test]
 fn browser_lists_certificate_files() {
     let directory = TestDirectory::new();
-    for name in ["a.pem", "b.CER", "c.p7b", "d.txt"] {
+    for name in [
+        "a.pem", "b.CER", "c.p7b", "d.txt", "e.csr", "f.CRL", "g.p10",
+    ] {
         fs::write(directory.path().join(name), b"").unwrap();
     }
     let mut app = browsing(directory.path());
     let rendered = screen(&mut app, 100, 24);
-    for name in ["a.pem", "b.CER", "c.p7b"] {
+    for name in ["a.pem", "b.CER", "c.p7b", "e.csr", "f.CRL", "g.p10"] {
         assert!(rendered.contains(name), "missing {name}");
     }
     assert!(!rendered.contains("d.txt"));
@@ -1136,6 +1199,7 @@ fn details_export_certificates_next_to_the_opened_file() {
             certificate: None,
             certificates: vec![leaf.clone(), root.clone()],
             chain_warning: None,
+            document: None,
         }],
     );
     press(&mut app, KeyCode::Enter);

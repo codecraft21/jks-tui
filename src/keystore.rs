@@ -44,15 +44,27 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// A signed object other than a certificate, read from a certificate file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Document {
+    /// A PKCS#10 certificate signing request.
+    Request,
+    /// An X.509 certificate revocation list.
+    RevocationList,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct KeystoreEntry {
     pub alias: String,
     pub kind: &'static str,
     /// The entry's certificate, or the first of a private key's chain.
     pub certificate: Option<Summary>,
-    /// Original DER in leaf-first stored order, including unreadable certificates.
+    /// Original DER in leaf-first stored order, including unreadable
+    /// certificates. With a `document`, the first element is that document
+    /// and any others are its issuer's chain.
     pub certificates: Vec<Vec<u8>>,
     pub chain_warning: Option<&'static str>,
+    pub document: Option<Document>,
 }
 
 /// A structurally valid keystore whose integrity digest has not been checked.
@@ -145,6 +157,7 @@ pub fn parse(mut data: Vec<u8>) -> Result<Keystore, Error> {
             certificate,
             certificates,
             chain_warning: None,
+            document: None,
         });
     }
     let body_len = data.len() - reader.remaining.len();
@@ -304,6 +317,7 @@ mod tests {
             certificate: None,
             certificates: vec![b"opaque synthetic certificate".to_vec()],
             chain_warning: None,
+            document: None,
         }
     }
 
@@ -314,6 +328,7 @@ mod tests {
             certificate: None,
             certificates: vec![b"opaque synthetic certificate".to_vec()],
             chain_warning: None,
+            document: None,
         }
     }
 
@@ -621,6 +636,7 @@ mod tests {
             certificate: None,
             certificates: vec![],
             chain_warning: None,
+            document: None,
         }
     }
 

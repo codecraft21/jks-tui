@@ -16,6 +16,8 @@ pub const KEYTOOL_JKS: &[u8] = include_bytes!("../tests/fixtures/trusted-cert.jk
 pub const UNICODE_PASSWORD_JKS: &[u8] = include_bytes!("../tests/fixtures/unicode-password.jks");
 pub const UNICODE_ALIAS_JKS: &[u8] = include_bytes!("../tests/fixtures/unicode-alias.jks");
 pub const KEYTOOL_JCEKS: &[u8] = include_bytes!("../tests/fixtures/trusted-cert.jceks");
+pub const OPENSSL_REQUEST: &[u8] = include_bytes!("../tests/fixtures/openssl-request.csr");
+pub const OPENSSL_CA_CRL: &[u8] = include_bytes!("../tests/fixtures/openssl-ca-crl.pem");
 
 /// The DER certificate stored in `KEYTOOL_JKS` under the alias `root-cert`.
 pub fn fixture_certificate_der() -> &'static [u8] {
@@ -31,7 +33,8 @@ pub fn fixture_summary() -> Summary {
         subject: "CN=JKS TUI test fixture".into(),
         algorithm: "EC".into(),
         key_size: Some(256),
-        not_after: Asn1Time::new(2036, 10, 9, 19, 48, 29, true).unwrap(),
+        not_after: Some(Asn1Time::new(2036, 10, 9, 19, 48, 29, true).unwrap()),
+        expiry_warning: true,
         weaknesses: vec![],
     }
 }
@@ -259,6 +262,75 @@ pub fn ed25519_certificate(subject: &str, issuer: &str, key: u8, issuer_key: u8)
     );
     let signature = ed25519::sign(&[issuer_key; 32], &tbs);
     der::sequence(&[tbs, algorithm, der::bit_string(0, &signature)].concat())
+}
+
+fn ed25519_algorithm() -> Vec<u8> {
+    use crown::asn1::{der, oid::ObjectIdentifier};
+    der::sequence(&der::oid(
+        &ObjectIdentifier::new(&[1, 3, 101, 112]).unwrap(),
+    ))
+}
+
+/// A PKCS#10 request for `CN=<subject>` with the given encoded attributes and
+/// an Ed25519 key made from the synthetic secret `[key; 32]`, signed with it.
+pub fn ed25519_request(subject: &str, attributes: &[Vec<u8>], key: u8) -> Vec<u8> {
+    use crown::{asn1::der, ed25519, x509::name::Name};
+    let public = ed25519::public_from_secret(&[key; 32]);
+    let info = der::sequence(
+        &[
+            der::integer_i64(0),
+            Name::from_common_name(subject).encode(),
+            der::sequence(&[ed25519_algorithm(), der::bit_string(0, &public)].concat()),
+            der::implicit(0, true, &attributes.concat()),
+        ]
+        .concat(),
+    );
+    let signature = ed25519::sign(&[key; 32], &info);
+    der::sequence(&[info, ed25519_algorithm(), der::bit_string(0, &signature)].concat())
+}
+
+/// A v2 revocation list from `CN=<issuer>`, listing the given encoded
+/// revoked-certificate entries, signed with the synthetic Ed25519 secret
+/// `[issuer_key; 32]`. `next_update` is a Unix time.
+pub fn ed25519_revocation_list(
+    issuer: &str,
+    next_update: Option<i64>,
+    revoked: &[Vec<u8>],
+    extensions: &[Vec<u8>],
+    issuer_key: u8,
+) -> Vec<u8> {
+    use crown::{asn1::der, ed25519, x509::name::Name};
+    let this_update = Asn1Time::new(2024, 1, 1, 0, 0, 0, true).unwrap();
+    let mut fields = [
+        der::integer_i64(1),
+        ed25519_algorithm(),
+        Name::from_common_name(issuer).encode(),
+        der::time(&this_update),
+    ]
+    .concat();
+    if let Some(next_update) = next_update {
+        fields.extend(der::time(&Asn1Time::from_unix(next_update, true)));
+    }
+    if !revoked.is_empty() {
+        fields.extend(der::sequence(&revoked.concat()));
+    }
+    if !extensions.is_empty() {
+        fields.extend(der::explicit(0, &der::sequence(&extensions.concat())));
+    }
+    let tbs = der::sequence(&fields);
+    let signature = ed25519::sign(&[issuer_key; 32], &tbs);
+    der::sequence(&[tbs, ed25519_algorithm(), der::bit_string(0, &signature)].concat())
+}
+
+/// A revoked-certificate entry, revoked on 2024-01-01.
+pub fn revoked_certificate(serial: &[u8], extensions: &[Vec<u8>]) -> Vec<u8> {
+    use crown::asn1::der;
+    let date = Asn1Time::new(2024, 1, 1, 0, 0, 0, true).unwrap();
+    let mut fields = [der::tlv(der::INTEGER, serial), der::time(&date)].concat();
+    if !extensions.is_empty() {
+        fields.extend(der::sequence(&extensions.concat()));
+    }
+    der::sequence(&fields)
 }
 
 /// A JCEKS secret key in the serialized `SealedObject` layout Java writes,

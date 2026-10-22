@@ -102,8 +102,7 @@ struct App {
 }
 
 const INCOMPLETE_WARNING: &str = "Warning: this PKCS12 entry list is incomplete.";
-const SKIPPED_WARNING: &str =
-    "Warning: PEM blocks other than certificates, such as private keys, were not read.";
+const SKIPPED_WARNING: &str = "Warning: PEM blocks other than certificates, requests, and revocation lists, such as private keys, were not read.";
 
 enum Loaded {
     Store(Store),
@@ -486,7 +485,7 @@ impl App {
         } else {
             frame.render_widget(
                 Paragraph::new(
-                    "No keystore selected.\n\nPress o to open a keystore (.jks, .jceks, .p12, .pfx) or a certificate file (.pem, .crt, .cer, .der, .p7b, .p7c).",
+                    "No keystore selected.\n\nPress o to open a keystore (.jks, .jceks, .p12, .pfx), a certificate file (.pem, .crt, .cer, .der, .p7b, .p7c), a certificate request (.csr, .p10), or a revocation list (.crl).",
                 )
                 .block(Block::bordered().title(" keystore-tui ".blue()))
                 .wrap(Wrap { trim: false }),
@@ -584,7 +583,7 @@ fn load(path: &Path) -> Result<Loaded, String> {
     } else if certificate_file::has_extension(path) {
         certificates()
     } else if data.first() == Some(&0x30) {
-        // A PFX never reads as a certificate or PKCS#7 bundle, so try those first.
+        // A PFX never reads as any certificate file content, so try that first.
         certificates().or_else(|_| pkcs12())
     } else {
         jks(data, path)
