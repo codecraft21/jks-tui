@@ -1173,3 +1173,61 @@ fn details_export_certificates_next_to_the_opened_file() {
     );
     assert!(press(&mut app, KeyCode::Char('q')));
 }
+
+#[test]
+fn weak_certificates_are_flagged_in_the_list_details_and_hierarchy() {
+    use crown::asn1::pem;
+    let directory = TestDirectory::new();
+    let path = directory.path().join("weak.pem");
+    let weak = test_support::sha1_signed_certificate("weak-leaf", "JKS TUI test fixture");
+    let text = [
+        pem::encode("CERTIFICATE", &weak),
+        pem::encode("CERTIFICATE", test_support::fixture_certificate_der()),
+    ]
+    .concat();
+    fs::write(&path, text).unwrap();
+    let mut app = App::default();
+    app.open_file(path);
+    assert_eq!(shown_aliases(&app), ["weak-leaf", "JKS TUI test fixture"]);
+    let yellow = |app: &mut App, width: u16, height: u16| -> String {
+        buffer(app, width, height)
+            .content
+            .iter()
+            .filter(|cell| cell.fg == Color::Yellow)
+            .map(|cell| cell.symbol())
+            .collect()
+    };
+    let list = screen(&mut app, 120, 24);
+    assert!(list.contains("Crypto"), "{list}");
+    // The selected weak row uses the amber highlight; the other row is not weak.
+    assert!(yellow(&mut app, 120, 24).is_empty());
+    press(&mut app, KeyCode::Down);
+    // A styled cell fills its column width.
+    assert_eq!(yellow(&mut app, 120, 24).trim_end(), "Weak");
+    press(&mut app, KeyCode::Up);
+    let rendered = buffer(&mut app, 120, 24);
+    let selected_row = rendered
+        .content
+        .chunks(120)
+        .find(|row| row.iter().any(|cell| cell.symbol() == ">"))
+        .unwrap();
+    let amber: String = selected_row
+        .iter()
+        .filter(|cell| cell.bg == Color::Rgb(255, 175, 0))
+        .map(|cell| cell.symbol())
+        .collect();
+    assert_eq!(amber.trim_end(), "Weak");
+
+    press(&mut app, KeyCode::Enter);
+    let details = screen(&mut app, 120, 50);
+    assert!(
+        details.contains("Weak: signed with SHA-1, which is no longer secure."),
+        "{details}"
+    );
+    assert!(details.contains("CN=weak-leaf [weak]"), "{details}");
+    // The self-signed fixture issuer is not weak.
+    assert!(!details.contains("CN=JKS TUI test fixture [weak]"));
+    press(&mut app, KeyCode::Up);
+    let issuer = screen(&mut app, 120, 50);
+    assert!(!issuer.contains("Weak:"), "{issuer}");
+}

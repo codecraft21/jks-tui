@@ -17,6 +17,7 @@ document, and also the README if users will notice.
   - [Filtering](#filtering)
   - [Sorting](#sorting)
 - [Entry details](#entry-details)
+  - [Weak cryptography](#weak-cryptography)
   - [Extensions](#extensions)
   - [Certificate hierarchy](#certificate-hierarchy)
   - [Exporting](#exporting)
@@ -117,8 +118,8 @@ document, and also the README if users will notice.
 
 - Every entry is listed, even when several entries share an alias. Entries are
   sorted by alias by default; entries sharing an alias keep their stored order.
-- Columns: Alias, Type, Algorithm, Key size, Expires. The meaning of each column
-  is in the README.
+- Columns: Alias, Type, Algorithm, Key size, Expires, Crypto. The meaning of
+  each column is in the README.
 - For a private-key entry, the certificate used for the columns is the first one
   in its chain. In PKCS12, that is the certificate that shares the key's local
   key ID.
@@ -127,6 +128,9 @@ document, and also the README if users will notice.
 - Key size means the modulus size for RSA and DSA, and the curve size for EC.
 - Expiry dates are in UTC. They are yellow when the certificate expires within
   30 days and red once it has expired.
+- The Crypto column shows `Weak` in yellow when the entry's certificate has a
+  weakness (see [Weak cryptography](#weak-cryptography)), and is empty
+  otherwise. It checks the entry's own certificate, not the rest of its chain.
 - A status bar above the keyboard shortcuts shows the keystore's absolute path as
   `Path: '<path>'`. Paths too long for the terminal width are clipped.
 - The table's bottom border shows, right-aligned, the entry count and sort order,
@@ -176,7 +180,8 @@ document, and also the README if users will notice.
   - validity timestamps in UTC; "Valid Until" turns red once the certificate
     has expired
   - public key algorithm and size
-  - signature algorithm
+  - signature algorithm, followed by one yellow `Weak: ...` line for each
+    weakness of the certificate
   - fingerprint: SHA-256 by default, SHA-1 as an alternative. Both are computed
     over the original certificate bytes. The chosen fingerprint stays selected
     when switching certificates.
@@ -186,6 +191,19 @@ document, and also the README if users will notice.
 - An entry without certificates still opens, with an explanation.
 - If one certificate in a chain cannot be read, the other chain members are
   still shown.
+
+### Weak cryptography
+
+- A certificate is weak when either:
+  - its RSA, RSASSA-PSS, or DSA key is shorter than 2048 bits, or its EC curve
+    is smaller than 256 bits (NIST SP 800-131A); or
+  - it is signed with MD2, MD5, or SHA-1 (RSA, ECDSA, or DSA signatures).
+- The signature of a self-signed certificate (issuer and subject encoded
+  identically) is not checked: a root is trusted for where it is stored, not
+  for its signature. Its key size is still checked.
+- Keys of unknown size, unrecognized algorithms, and other signature algorithms
+  are not flagged. Nothing is verified; the check reads only the stored fields.
+- In the hierarchy, a weak certificate's label ends with `[weak]` in yellow.
 
 ### Extensions
 
@@ -265,7 +283,7 @@ document, and also the README if users will notice.
   background instead.
 - Dates expiring within 30 days, and not yet expired, are yellow. On the
   selected row they are bold black on an amber (`Rgb(255, 175, 0)`) background
-  instead.
+  instead. A `Weak` crypto marker uses the same colours.
 
 ## Quitting and terminal restoration
 

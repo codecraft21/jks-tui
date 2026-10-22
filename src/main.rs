@@ -433,9 +433,16 @@ impl App {
                                     (ExpiryStatus::ExpiringSoon, false) => expiry.fg(Color::Yellow),
                                     (ExpiryStatus::Valid, _) => expiry,
                                 },
+                                match (summary.weaknesses.is_empty(), is_selected) {
+                                    (true, _) => Cell::from(""),
+                                    (false, true) => Cell::from("Weak")
+                                        .fg(Color::Rgb(0, 0, 0))
+                                        .bg(Color::Rgb(255, 175, 0)),
+                                    (false, false) => Cell::from("Weak").fg(Color::Yellow),
+                                },
                             ]);
                         }
-                        None => cells.extend(["-", "-", "-"].map(Cell::from)),
+                        None => cells.extend(["-", "-", "-", "-"].map(Cell::from)),
                     }
                     let row = Row::new(cells);
                     if is_selected {
@@ -457,9 +464,20 @@ impl App {
                         Constraint::Length(10),
                         Constraint::Length(9),
                         Constraint::Length(10),
+                        Constraint::Length(6),
                     ],
                 )
-                .header(Row::new(["Alias", "Type", "Algorithm", "Key size", "Expires"]).bold())
+                .header(
+                    Row::new([
+                        "Alias",
+                        "Type",
+                        "Algorithm",
+                        "Key size",
+                        "Expires",
+                        "Crypto",
+                    ])
+                    .bold(),
+                )
                 .block(block)
                 .highlight_symbol("> ");
                 frame.render_stateful_widget(table, content, &mut self.entries_state);

@@ -27,6 +27,7 @@ This file covers how the code is organised and how to work on it.
 | `src/certificate.rs` | X.509 summary (subject, algorithm, key size, expiry) for the entry table |
 | `src/certificate/details.rs` | Full certificate fields for the detail view |
 | `src/certificate/extensions.rs` | Decoding X.509 extensions into display lines |
+| `src/certificate/security.rs` | Weak key-size and signature-hash checks |
 | `src/entry_details.rs` | The full-screen detail view and the certificate hierarchy |
 | `src/export.rs` | The export name prompt and writing PEM/DER files |
 | `src/test_support.rs`, `src/tests.rs` | Unit-test helpers, synthetic keystores, and tests |

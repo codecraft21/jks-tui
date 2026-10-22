@@ -30,6 +30,7 @@ pub fn fixture_summary() -> Summary {
         algorithm: "EC".into(),
         key_size: Some(256),
         not_after: Asn1Time::new(2036, 10, 9, 19, 48, 29, true).unwrap(),
+        weaknesses: vec![],
     }
 }
 
@@ -152,6 +153,25 @@ pub fn metadata_certificate(
     serial: &[u8],
     extensions: &[Vec<u8>],
 ) -> Vec<u8> {
+    signed_metadata_certificate(subject, issuer, serial, extensions, None)
+}
+
+/// Like `metadata_certificate`, but claiming an ECDSA with SHA-1 signature.
+pub fn sha1_signed_certificate(subject: &str, issuer: &str) -> Vec<u8> {
+    use crown::asn1::{der, oid::ObjectIdentifier};
+    let algorithm = der::sequence(&der::oid(
+        &ObjectIdentifier::new(&[1, 2, 840, 10045, 4, 1]).unwrap(),
+    ));
+    signed_metadata_certificate(subject, issuer, &[1], &[], Some(&algorithm))
+}
+
+fn signed_metadata_certificate(
+    subject: &str,
+    issuer: &str,
+    serial: &[u8],
+    extensions: &[Vec<u8>],
+    signature_algorithm: Option<&[u8]>,
+) -> Vec<u8> {
     use crown::{
         asn1::{Reader, der},
         x509::name::Name,
@@ -162,7 +182,8 @@ pub fn metadata_certificate(
     let mut tbs = certificate.read_sequence().unwrap();
     tbs.read_raw_tlv().unwrap(); // Version.
     tbs.read_raw_tlv().unwrap(); // Serial.
-    let signature = tbs.read_raw_tlv().unwrap();
+    let stored_signature = tbs.read_raw_tlv().unwrap();
+    let signature = signature_algorithm.unwrap_or(stored_signature);
     tbs.read_raw_tlv().unwrap(); // Issuer.
     let validity = tbs.read_raw_tlv().unwrap();
     tbs.read_raw_tlv().unwrap(); // Subject.

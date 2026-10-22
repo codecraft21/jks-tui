@@ -186,7 +186,10 @@ pub(super) fn serial_text(bytes: &[u8], hex: bool) -> String {
 
 fn signature_name(id: &ObjectIdentifier) -> String {
     let names: &[(&[u64], &str)] = &[
+        (&[1, 2, 840, 113549, 1, 1, 2], "MD2 with RSA"),
+        (&[1, 2, 840, 113549, 1, 1, 4], "MD5 with RSA"),
         (&[1, 2, 840, 113549, 1, 1, 5], "SHA-1 with RSA"),
+        (&[1, 3, 14, 3, 2, 29], "SHA-1 with RSA"),
         (&[1, 2, 840, 113549, 1, 1, 11], "SHA-256 with RSA"),
         (&[1, 2, 840, 113549, 1, 1, 12], "SHA-384 with RSA"),
         (&[1, 2, 840, 113549, 1, 1, 13], "SHA-512 with RSA"),

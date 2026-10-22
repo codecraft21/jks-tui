@@ -1,5 +1,6 @@
 pub mod details;
 pub mod extensions;
+pub mod security;
 
 use crown::{
     asn1::{Asn1Time, Reader, der::Class, oid},
@@ -15,6 +16,8 @@ pub struct Summary {
     /// `None` when the size is unknown or not meaningful for the algorithm.
     pub key_size: Option<u32>,
     pub not_after: Asn1Time,
+    /// Weak key or signature choices, in that order; empty when none are found.
+    pub weaknesses: Vec<security::Weakness>,
 }
 
 impl Summary {
@@ -49,8 +52,8 @@ pub fn summarize(der: &[u8]) -> Option<Summary> {
         tbs.read_raw_tlv().ok()?; // Version.
     }
     tbs.read_raw_tlv().ok()?; // Serial number, possibly negative.
-    tbs.read_raw_tlv().ok()?; // Signature algorithm.
-    tbs.read_raw_tlv().ok()?; // Issuer.
+    let signature = tbs.read_sequence().ok()?.read_oid().ok()?;
+    let issuer = tbs.read_raw_tlv().ok()?;
     let mut validity = tbs.read_sequence().ok()?;
     validity.read_time().ok()?;
     let not_after = validity.read_time().ok()?;
@@ -108,6 +111,7 @@ pub fn summarize(der: &[u8]) -> Option<Summary> {
             |(_, name, size)| (name.into(), size),
         )
     };
+    let weaknesses = security::weaknesses(&name, key_size, &signature, issuer == subject);
     Some(Summary {
         // Unusual names must not hide the entry, so decode failures leave it empty.
         subject: Name::parse(&mut Reader::new(subject))
@@ -116,6 +120,7 @@ pub fn summarize(der: &[u8]) -> Option<Summary> {
         algorithm: name,
         key_size,
         not_after,
+        weaknesses,
     })
 }
 
@@ -212,6 +217,28 @@ mod tests {
             assert_eq!(summary.key_size, size, "{name}");
             assert_eq!(summary.expiry_text(), "2051-02-03");
         }
+    }
+
+    #[test]
+    fn reports_short_keys_as_weaknesses() {
+        let expiry = Asn1Time::new(2051, 2, 3, 4, 5, 6, false).unwrap();
+        let mut modulus = vec![0x80];
+        modulus.resize(128, 0);
+        let rsa_key = der::sequence(&[der::integer(&modulus), der::integer(&[1, 0, 1])].concat());
+        let summary = summarize(&certificate(
+            algorithm(oid::OID_RSA_ENCRYPTION, Some(&der::null())),
+            &rsa_key,
+            &expiry,
+        ))
+        .unwrap();
+        assert_eq!(
+            summary.weaknesses,
+            [security::Weakness::ShortKey {
+                algorithm: "RSA".into(),
+                bits: 1024,
+                minimum: 2048,
+            }]
+        );
     }
 
     #[test]

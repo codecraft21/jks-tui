@@ -8,6 +8,8 @@ opens standalone certificate files (`.pem`, `.crt`, `.cer`, `.der`, `.p7b`,
 - Lists every entry with its type (private key, trusted certificate, or secret
   key), public key algorithm, key size, and expiry date. Certificates expiring
   within 30 days are shown in yellow and expired ones in red.
+- Flags weak cryptography: RSA and DSA keys under 2048 bits, EC keys under 256
+  bits, and MD2, MD5, or SHA-1 signatures.
 - Filters entries by alias or subject, and sorts them by alias or expiry date.
 - Shows each certificate's full details, including decoded extensions, and its
   certificate hierarchy.
@@ -69,6 +71,7 @@ entry count, any filter, and the sort order.
 | Algorithm | The certificate's public key algorithm (RSA, EC, DSA, Ed25519, ...) |
 | Key size | The key size in bits (RSA/DSA modulus, EC curve size) |
 | Expires | The certificate's expiry date (UTC): yellow within 30 days of expiry, red once it has passed |
+| Crypto | `Weak`, in yellow, when the certificate's key is too short or its signature uses a broken hash |
 
 | Key | Action in the entry list |
 | --- | --- |
@@ -96,6 +99,11 @@ serial number, validity, public key, signature algorithm, SHA-256 or SHA-1
 fingerprint, and extensions. Common extensions such as Subject Alternative Name,
 Key Usage, Extended Key Usage, and Basic Constraints are decoded; others are
 shown as their OID and value in hex.
+
+Weak keys and signatures are explained in yellow below the signature algorithm,
+and weak certificates are marked `[weak]` in the hierarchy. A self-signed
+certificate's own signature is not flagged, because a root is trusted for where
+it is stored rather than for its signature.
 
 | Key | Action in the detail view |
 | --- | --- |

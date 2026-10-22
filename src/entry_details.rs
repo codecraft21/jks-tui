@@ -182,7 +182,8 @@ impl EntryDetails {
         };
         let mut lines = Vec::new();
         if let Some(info) = &self.metadata[index] {
-            let public_key = certificate::summarize(&entry.certificates[index]).map_or_else(
+            let summary = certificate::summarize(&entry.certificates[index]);
+            let public_key = summary.as_ref().map_or_else(
                 || "Unavailable".into(),
                 |summary| format!("{} {}", summary.algorithm, summary.key_size_text()),
             );
@@ -201,10 +202,17 @@ impl EntryDetails {
                     expiry
                 },
             ]));
-            text = format!(
-                "\nPublic Key: {public_key}\n\nSignature Algorithm: {}\n\n",
-                info.signature_algorithm,
+            lines.extend(
+                Text::from(format!(
+                    "\nPublic Key: {public_key}\n\nSignature Algorithm: {}\n",
+                    info.signature_algorithm,
+                ))
+                .lines,
             );
+            for weakness in summary.iter().flat_map(|summary| &summary.weaknesses) {
+                lines.push(Line::from(format!("Weak: {weakness}.")).yellow());
+            }
+            text = "\n".into();
         } else {
             text.push_str("Certificate could not be decoded.\n\n");
         }
@@ -297,7 +305,17 @@ impl EntryDetails {
                             .unwrap_or_else(|| {
                                 format!("Certificate {} (unreadable or unnamed)", index + 1)
                             });
-                        Row::new([format!("{}{}", "  ".repeat(depth.min(8)), label)])
+                        let weak = certificate::summarize(&entry.certificates[index])
+                            .is_some_and(|summary| !summary.weaknesses.is_empty());
+                        let indent = "  ".repeat(depth.min(8));
+                        Row::new([if weak {
+                            Line::from(vec![
+                                Span::raw(format!("{indent}{label} ")),
+                                Span::raw("[weak]").yellow(),
+                            ])
+                        } else {
+                            Line::from(format!("{indent}{label}"))
+                        }])
                     });
             let table = Table::new(rows, [Constraint::Min(0)])
                 .block(tree_block)
