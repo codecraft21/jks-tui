@@ -205,7 +205,8 @@ document, and also the README if users will notice.
     has expired
   - public key algorithm and size
   - signature algorithm, followed by one yellow `Weak: ...` line for each
-    weakness of the certificate
+    weakness of the certificate, then the signature check; see
+    [Signature checks](#signature-checks)
   - fingerprint: SHA-256 by default, SHA-1 as an alternative. Both are computed
     over the original certificate bytes. The chosen fingerprint stays selected
     when switching certificates.
@@ -226,7 +227,8 @@ document, and also the README if users will notice.
   identically) is not checked: a root is trusted for where it is stored, not
   for its signature. Its key size is still checked.
 - Keys of unknown size, unrecognized algorithms, and other signature algorithms
-  are not flagged. Nothing is verified; the check reads only the stored fields.
+  are not flagged. This check reads only the stored fields; signatures are
+  checked separately, see [Signature checks](#signature-checks).
 - In the hierarchy, a weak certificate's label ends with `[weak]` in yellow.
 
 ### Extensions
@@ -268,7 +270,36 @@ document, and also the README if users will notice.
   certificate in the same file with that subject. Names are compared by their
   decoded text, ignoring case. The chain stops at a self-issued certificate, a
   missing issuer, or a certificate already in the chain.
-- The app never fetches certificates and never verifies trust or signatures.
+- The app never fetches certificates and never verifies trust.
+
+### Signature checks
+
+- Each certificate's signature is checked with the public key of the next
+  certificate in the hierarchy (its stored issuer). The last certificate is
+  checked with its own key when it is self-issued (issuer and subject decode to
+  the same name); otherwise its issuer is not stored and it is not checked.
+- Checks run offline when the detail view opens. Only the signature is checked:
+  names, validity, basic constraints, key usage, and revocation are not, and no
+  trust decision is made. A verified self-signature only shows that the root
+  certificate is intact.
+- Results, as a tag at the end of each hierarchy label (after any `[weak]`) and
+  as a `Signature:` line in the details:
+
+  | Result | Tag | Details line |
+  | --- | --- | --- |
+  | Verified | `[verified]`, green | `verified with the public key of <issuer subject>.` or `verified with its own public key (self-signed).`, green |
+  | Failed | `[bad signature]`, red | `does not verify with ...: <reason>.`, red |
+  | Unchecked | `[unchecked]` | `not checked (<reason>).` |
+
+- A signature fails when the signature algorithm inside the signed part differs
+  from the one outside it, when the issuer's key type cannot make that kind of
+  signature, or when the signature does not match the signed bytes.
+- A signature is unchecked when the issuer is not stored, when either
+  certificate cannot be decoded, or when the signature algorithm or the issuer's
+  key type is not supported.
+- Supported signatures include RSA PKCS#1 v1.5, RSASSA-PSS made by RSA keys,
+  ECDSA on P-256, P-384, and P-521, DSA, Ed25519, and Ed448. Keys of type
+  RSASSA-PSS, brainpool curves, and secp256k1 are not supported.
 
 ### Exporting
 

@@ -225,6 +225,42 @@ fn signed_metadata_certificate(
     )
 }
 
+/// A certificate with an Ed25519 key made from the synthetic secret
+/// `[key; 32]`, signed with the synthetic secret `[issuer_key; 32]`.
+pub fn ed25519_certificate(subject: &str, issuer: &str, key: u8, issuer_key: u8) -> Vec<u8> {
+    use crown::{
+        asn1::{Reader, der, oid::ObjectIdentifier},
+        ed25519,
+        x509::name::Name,
+    };
+    let mut fixture = Reader::new(fixture_certificate_der())
+        .read_sequence()
+        .unwrap();
+    let mut fields = fixture.read_sequence().unwrap();
+    for _ in 0..4 {
+        fields.read_raw_tlv().unwrap(); // Version, serial, signature, issuer.
+    }
+    let validity = fields.read_raw_tlv().unwrap();
+    let algorithm = der::sequence(&der::oid(
+        &ObjectIdentifier::new(&[1, 3, 101, 112]).unwrap(),
+    ));
+    let public = ed25519::public_from_secret(&[key; 32]);
+    let tbs = der::sequence(
+        &[
+            der::explicit(0, &der::integer_i64(2)),
+            der::integer_i64(i64::from(key)),
+            algorithm.clone(),
+            Name::from_common_name(issuer).encode(),
+            validity.to_vec(),
+            Name::from_common_name(subject).encode(),
+            der::sequence(&[algorithm.clone(), der::bit_string(0, &public)].concat()),
+        ]
+        .concat(),
+    );
+    let signature = ed25519::sign(&[issuer_key; 32], &tbs);
+    der::sequence(&[tbs, algorithm, der::bit_string(0, &signature)].concat())
+}
+
 /// A JCEKS secret key in the serialized `SealedObject` layout Java writes,
 /// with synthetic bytes in place of the encrypted key.
 pub fn sealed_secret_key() -> Vec<u8> {
