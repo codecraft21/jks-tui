@@ -11,7 +11,7 @@ use crown::{
 };
 use zeroize::Zeroizing;
 
-use crate::{certificate, keystore::KeystoreEntry};
+use crate::{certificate, certificate_file, keystore::KeystoreEntry};
 
 const MAX_ITERATIONS: u32 = 1_000_000;
 const MAX_SALT_SIZE: usize = 64;
@@ -114,41 +114,47 @@ impl Store {
             }
         }
 
+        let pool: Vec<_> = bags
+            .iter()
+            .filter_map(|bag| bag.certificate_der.as_deref())
+            .collect();
         let mut entries = Vec::new();
+        let mut unnamed_keys = 0;
         for bag in &bags {
             if matches!(bag.bag, Bag::ShroudedKey(_)) {
-                if let Some(alias) = bag.friendly_name() {
-                    // Java gives the key and its end-entity certificate the
-                    // same local key ID.
-                    let leaf = bag
-                        .local_key_id()
-                        .and_then(|id| {
-                            bags.iter().find(|other| {
-                                other.certificate_der.is_some()
-                                    && other.local_key_id().as_ref() == Some(&id)
-                            })
+                // Java and OpenSSL give the key and its end-entity certificate
+                // the same local key ID.
+                let leaf = bag
+                    .local_key_id()
+                    .and_then(|id| {
+                        bags.iter().find(|other| {
+                            other.certificate_der.is_some()
+                                && other.local_key_id().as_ref() == Some(&id)
                         })
-                        .and_then(|bag| bag.certificate_der.as_deref());
-                    let pool: Vec<_> = bags
-                        .iter()
-                        .filter_map(|bag| bag.certificate_der.as_deref())
-                        .collect();
-                    let (certificates, chain_warning) = leaf.map_or_else(
-                        || (vec![], None),
-                        |leaf| certificate::details::chain(leaf, &pool),
-                    );
-                    entries.push(KeystoreEntry {
-                        alias,
-                        kind: "Private key",
-                        certificate: leaf.and_then(certificate::summarize),
-                        certificates,
-                        chain_warning,
+                    })
+                    .and_then(|bag| bag.certificate_der.as_deref());
+                // OpenSSL only stores a friendly name when given one.
+                let alias = bag
+                    .friendly_name()
+                    .or_else(|| leaf.and_then(certificate_file::subject_name))
+                    .unwrap_or_else(|| {
+                        unnamed_keys += 1;
+                        format!("Private key {unnamed_keys}")
                     });
-                } else {
-                    incomplete = true;
-                }
+                let (certificates, chain_warning) = leaf.map_or_else(
+                    || (vec![], None),
+                    |leaf| certificate::details::chain(leaf, &pool),
+                );
+                entries.push(KeystoreEntry {
+                    alias,
+                    kind: "Private key",
+                    certificate: leaf.and_then(certificate::summarize),
+                    certificates,
+                    chain_warning,
+                });
             }
         }
+        let mut unnamed_certificates = 0;
         for bag in &bags {
             match &bag.bag {
                 Bag::Secret { .. } => {
@@ -165,12 +171,36 @@ impl Store {
                     }
                 }
                 _ if bag.certificate_der.is_some() => {
-                    // Java identifies trusted entries with its trustedKeyUsage attribute.
+                    let der = bag.certificate_der.as_deref().unwrap();
+                    // Java identifies trusted entries with its trustedKeyUsage
+                    // attribute. Other tools store plain certificates, which
+                    // are listed unless they belong to a key's chain.
                     if !bag
                         .attributes
                         .iter()
                         .any(|attr| attr.oid.matches(TRUSTED_KEY_USAGE))
                     {
+                        if entries.iter().any(|entry| {
+                            entry.kind == "Private key"
+                                && entry.certificates.iter().any(|stored| stored == der)
+                        }) {
+                            continue;
+                        }
+                        let alias = bag
+                            .friendly_name()
+                            .or_else(|| certificate_file::subject_name(der))
+                            .unwrap_or_else(|| {
+                                unnamed_certificates += 1;
+                                format!("Certificate {unnamed_certificates}")
+                            });
+                        let (certificates, chain_warning) = certificate::details::chain(der, &pool);
+                        entries.push(KeystoreEntry {
+                            alias,
+                            kind: certificate_file::KIND,
+                            certificate: certificate::summarize(der),
+                            certificates,
+                            chain_warning,
+                        });
                         continue;
                     }
                     if let Some(alias) = bag.friendly_name() {
@@ -178,11 +208,6 @@ impl Store {
                             .iter()
                             .any(|entry| entry.alias.eq_ignore_ascii_case(&alias))
                         {
-                            let der = bag.certificate_der.as_deref().unwrap();
-                            let pool: Vec<_> = bags
-                                .iter()
-                                .filter_map(|bag| bag.certificate_der.as_deref())
-                                .collect();
                             let (certificates, chain_warning) =
                                 certificate::details::chain(der, &pool);
                             entries.push(KeystoreEntry {
@@ -315,6 +340,8 @@ mod tests {
     const UNICODE_ALIAS: &[u8] = include_bytes!("../tests/fixtures/unicode-alias.p12");
     const EMPTY_PASSWORD: &[u8] = include_bytes!("../tests/fixtures/empty-password.p12");
     const NUL_PASSWORD: &[u8] = include_bytes!("../tests/fixtures/nul-password.p12");
+    const OPENSSL: &[u8] = include_bytes!("../tests/fixtures/openssl-cert.p12");
+    const OPENSSL_LEGACY: &[u8] = include_bytes!("../tests/fixtures/openssl-cert-legacy.p12");
 
     struct TestRng(u8);
     impl Rng for TestRng {
@@ -343,6 +370,26 @@ mod tests {
                 vec![KeystoreEntry {
                     alias: "root-cert".into(),
                     kind: "Trusted certificate",
+                    certificate: Some(fixture_summary()),
+                    certificates: vec![fixture_certificate_der().to_vec()],
+                    chain_warning: None,
+                }]
+            );
+            assert!(!verified.incomplete);
+        }
+    }
+
+    #[test]
+    fn reads_openssl_certificate_stores_without_java_attributes() {
+        for data in [OPENSSL, OPENSSL_LEGACY] {
+            let store = parse(data).unwrap();
+            assert!(matches!(store.verify("wrong"), Err(VerifyError::Password)));
+            let verified = store.verify("changeit").unwrap();
+            assert_eq!(
+                verified.entries,
+                vec![KeystoreEntry {
+                    alias: "JKS TUI test fixture".into(),
+                    kind: certificate_file::KIND,
                     certificate: Some(fixture_summary()),
                     certificates: vec![fixture_certificate_der().to_vec()],
                     chain_warning: None,
@@ -565,9 +612,54 @@ mod tests {
         ]);
         let verified = parse(&data).unwrap().verify("changeit").unwrap();
         assert!(!verified.incomplete);
-        assert_eq!(verified.entries.len(), 1);
+        // Chain members are not listed again, but an unrelated certificate is.
+        assert_eq!(verified.entries.len(), 2);
         assert_eq!(verified.entries[0].certificates, [leaf, intermediate, root]);
         assert_eq!(verified.entries[0].chain_warning, None);
+        assert_eq!(verified.entries[1].alias, "other");
+        assert_eq!(verified.entries[1].kind, certificate_file::KIND);
+        assert_eq!(verified.entries[1].certificates, [unrelated]);
+    }
+
+    #[test]
+    fn names_unnamed_keys_and_lists_plain_certificates_like_openssl_writes_them() {
+        use crate::test_support::metadata_certificate;
+        let leaf = metadata_certificate("leaf", "ca", &[1], &[]);
+        let ca = metadata_certificate("ca", "ca", &[2], &[]);
+        let loose = metadata_certificate("loose", "loose", &[3], &[]);
+        let key = |id: &[u8]| SafeBag {
+            bag: Bag::ShroudedKey(EncryptedPrivateKeyInfo {
+                algorithm: AlgorithmIdentifier::with_null(
+                    ObjectIdentifier::new(oid::OID_PBES2).unwrap(),
+                ),
+                encrypted_data: vec![1, 2, 3],
+            }),
+            attributes: vec![local_key_id(id)],
+        };
+        let data = synthetic(vec![
+            key(&[1]),
+            key(&[9]),
+            raw_certificate(&leaf, vec![local_key_id(&[1])]),
+            raw_certificate(&ca, vec![]),
+            raw_certificate(&loose, vec![friendly_name("named")]),
+            raw_certificate(b"unreadable", vec![]),
+        ]);
+        let verified = parse(&data).unwrap().verify("changeit").unwrap();
+        assert!(!verified.incomplete);
+        let listed: Vec<_> = verified
+            .entries
+            .iter()
+            .map(|entry| (entry.alias.as_str(), entry.kind, entry.certificates.len()))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("Certificate 1", certificate_file::KIND, 1),
+                ("Private key 1", "Private key", 0),
+                ("leaf", "Private key", 2),
+                ("named", certificate_file::KIND, 1),
+            ]
+        );
     }
 
     #[test]

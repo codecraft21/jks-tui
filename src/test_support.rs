@@ -8,12 +8,14 @@ use crown::asn1::Asn1Time;
 
 use crate::certificate::Summary;
 use crate::keystore::{
-    CERTIFICATE_TYPE, MAGIC, PRIVATE_KEY_TAG, TRUSTED_CERT_TAG, VERSION_02, digest_of,
+    CERTIFICATE_TYPE, JCEKS_MAGIC, MAGIC, PRIVATE_KEY_TAG, SECRET_KEY_TAG, TRUSTED_CERT_TAG,
+    VERSION_02, digest_of,
 };
 
 pub const KEYTOOL_JKS: &[u8] = include_bytes!("../tests/fixtures/trusted-cert.jks");
 pub const UNICODE_PASSWORD_JKS: &[u8] = include_bytes!("../tests/fixtures/unicode-password.jks");
 pub const UNICODE_ALIAS_JKS: &[u8] = include_bytes!("../tests/fixtures/unicode-alias.jks");
+pub const KEYTOOL_JCEKS: &[u8] = include_bytes!("../tests/fixtures/trusted-cert.jceks");
 
 /// The DER certificate stored in `KEYTOOL_JKS` under the alias `root-cert`.
 pub fn fixture_certificate_der() -> &'static [u8] {
@@ -30,6 +32,7 @@ pub fn fixture_summary() -> Summary {
         algorithm: "EC".into(),
         key_size: Some(256),
         not_after: Asn1Time::new(2036, 10, 9, 19, 48, 29, true).unwrap(),
+        weaknesses: vec![],
     }
 }
 
@@ -71,8 +74,16 @@ pub struct Builder {
 
 impl Builder {
     pub fn new(version: u32, count: u32) -> Self {
+        Self::with_magic(MAGIC, version, count)
+    }
+
+    pub fn jceks(version: u32, count: u32) -> Self {
+        Self::with_magic(JCEKS_MAGIC, version, count)
+    }
+
+    fn with_magic(magic: u32, version: u32, count: u32) -> Self {
         let mut builder = Self::default();
-        builder.u32(MAGIC);
+        builder.u32(magic);
         builder.u32(version);
         builder.u32_field(count);
         builder
@@ -115,6 +126,10 @@ impl Builder {
 
     pub fn entry(&mut self, tag: u32, alias: &[u8], version: u32, certificates: u32) {
         self.entry_header(tag, alias);
+        if tag == SECRET_KEY_TAG {
+            self.body.extend(sealed_secret_key());
+            return;
+        }
         if tag == PRIVATE_KEY_TAG {
             // Entry listing treats encrypted key bytes as opaque. Do not
             // store an actual private key in the test source or fixtures.
@@ -152,6 +167,25 @@ pub fn metadata_certificate(
     serial: &[u8],
     extensions: &[Vec<u8>],
 ) -> Vec<u8> {
+    signed_metadata_certificate(subject, issuer, serial, extensions, None)
+}
+
+/// Like `metadata_certificate`, but claiming an ECDSA with SHA-1 signature.
+pub fn sha1_signed_certificate(subject: &str, issuer: &str) -> Vec<u8> {
+    use crown::asn1::{der, oid::ObjectIdentifier};
+    let algorithm = der::sequence(&der::oid(
+        &ObjectIdentifier::new(&[1, 2, 840, 10045, 4, 1]).unwrap(),
+    ));
+    signed_metadata_certificate(subject, issuer, &[1], &[], Some(&algorithm))
+}
+
+fn signed_metadata_certificate(
+    subject: &str,
+    issuer: &str,
+    serial: &[u8],
+    extensions: &[Vec<u8>],
+    signature_algorithm: Option<&[u8]>,
+) -> Vec<u8> {
     use crown::{
         asn1::{Reader, der},
         x509::name::Name,
@@ -162,7 +196,8 @@ pub fn metadata_certificate(
     let mut tbs = certificate.read_sequence().unwrap();
     tbs.read_raw_tlv().unwrap(); // Version.
     tbs.read_raw_tlv().unwrap(); // Serial.
-    let signature = tbs.read_raw_tlv().unwrap();
+    let stored_signature = tbs.read_raw_tlv().unwrap();
+    let signature = signature_algorithm.unwrap_or(stored_signature);
     tbs.read_raw_tlv().unwrap(); // Issuer.
     let validity = tbs.read_raw_tlv().unwrap();
     tbs.read_raw_tlv().unwrap(); // Subject.
@@ -188,4 +223,50 @@ pub fn metadata_certificate(
         ]
         .concat(),
     )
+}
+
+/// A JCEKS secret key in the serialized `SealedObject` layout Java writes,
+/// with synthetic bytes in place of the encrypted key.
+pub fn sealed_secret_key() -> Vec<u8> {
+    fn utf(text: &str) -> Vec<u8> {
+        [&(text.len() as u16).to_be_bytes()[..], text.as_bytes()].concat()
+    }
+    fn byte_array(bytes: &[u8]) -> Vec<u8> {
+        [&(bytes.len() as u32).to_be_bytes()[..], bytes].concat()
+    }
+    [
+        &[0xac, 0xed, 0x00, 0x05, 0x73, 0x72][..],
+        &utf("com.sun.crypto.provider.SealedObjectForKeyProtector"),
+        &[
+            0xcd, 0x57, 0xca, 0x59, 0xe7, 0x30, 0xbb, 0x53, 0x02, 0x00, 0x00, 0x78, 0x72,
+        ],
+        &utf("javax.crypto.SealedObject"),
+        &[
+            0x3e, 0x36, 0x3d, 0xa6, 0xc3, 0xb7, 0x54, 0x70, 0x02, 0x00, 0x04, b'[',
+        ],
+        &utf("encodedParams"),
+        &[0x74],
+        &utf("[B"),
+        b"[",
+        &utf("encryptedContent"),
+        &[0x71, 0x00, 0x7e, 0x00, 0x02, b'L'],
+        &utf("paramsAlg"),
+        &[0x74],
+        &utf("Ljava/lang/String;"),
+        b"L",
+        &utf("sealAlg"),
+        &[0x71, 0x00, 0x7e, 0x00, 0x03, 0x78, 0x70, 0x75, 0x72],
+        &utf("[B"),
+        &[
+            0xac, 0xf3, 0x17, 0xf8, 0x06, 0x08, 0x54, 0xe0, 0x02, 0x00, 0x00, 0x78, 0x70,
+        ],
+        &byte_array(b"synthetic parameters"),
+        &[0x75, 0x71, 0x00, 0x7e, 0x00, 0x05],
+        &byte_array(b"synthetic test payload, not a secret key"),
+        &[0x74],
+        &utf("PBEWithMD5AndTripleDES"),
+        &[0x74],
+        &utf("PBEWithMD5AndTripleDES"),
+    ]
+    .concat()
 }

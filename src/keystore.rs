@@ -3,13 +3,21 @@ use std::fmt;
 use sha1::{Digest, Sha1};
 use zeroize::Zeroize;
 
-use crate::certificate::{self, Summary};
+use crate::{
+    certificate::{self, Summary},
+    java_serialization,
+};
 
 pub(crate) const MAGIC: u32 = 0xfeed_feed;
+/// JCEKS shares the JKS layout and digest, and adds secret-key entries.
+pub(crate) const JCEKS_MAGIC: u32 = 0xcece_cece;
 pub(crate) const VERSION_01: u32 = 1;
 pub(crate) const VERSION_02: u32 = 2;
 pub(crate) const PRIVATE_KEY_TAG: u32 = 1;
 pub(crate) const TRUSTED_CERT_TAG: u32 = 2;
+pub(crate) const SECRET_KEY_TAG: u32 = 3;
+/// The class Java seals JCEKS secret keys in.
+const SEALED_KEY_CLASS: &[u8] = b"com.sun.crypto.provider.SealedObjectForKeyProtector";
 /// Java appends this to the password before hashing the keystore body.
 const WHITENER_MESSAGE: &[u8] = b"Mighty Aphrodite";
 
@@ -25,10 +33,10 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidMagic => f.write_str("not a JKS file (bad magic number)"),
-            Self::UnknownVersion(version) => write!(f, "unsupported JKS version {version}"),
+            Self::InvalidMagic => f.write_str("not a JKS or JCEKS file (bad magic number)"),
+            Self::UnknownVersion(version) => write!(f, "unsupported keystore version {version}"),
             Self::UnknownEntryTag(tag) => write!(f, "unknown entry tag {tag}"),
-            Self::Truncated => f.write_str("truncated JKS data"),
+            Self::Truncated => f.write_str("truncated keystore data"),
             Self::Invalid(message) => f.write_str(message),
         }
     }
@@ -60,12 +68,22 @@ pub(crate) const DIGEST_LEN: usize = 20;
 /// The only certificate type standard Java providers can load from a JKS file.
 pub(crate) const CERTIFICATE_TYPE: &str = "X.509";
 
+/// Whether the data starts with the JKS or JCEKS magic number.
+pub fn has_magic(data: &[u8]) -> bool {
+    data.starts_with(&MAGIC.to_be_bytes()) || is_jceks(data)
+}
+
+pub fn is_jceks(data: &[u8]) -> bool {
+    data.starts_with(&JCEKS_MAGIC.to_be_bytes())
+}
+
 pub fn parse(mut data: Vec<u8>) -> Result<Keystore, Error> {
     // Check the magic first so short or empty non-JKS files are reported as
     // such rather than as truncated keystores.
-    if data.get(..4) != Some(&MAGIC.to_be_bytes()[..]) {
+    if !has_magic(&data) {
         return Err(Error::InvalidMagic);
     }
+    let jceks = is_jceks(&data);
     let mut reader = Reader {
         remaining: &data[4..],
     };
@@ -103,6 +121,21 @@ pub fn parse(mut data: Vec<u8>) -> Result<Keystore, Error> {
                 let encoding = reader.certificate(version)?;
                 certificates.push(encoding.to_vec());
                 ("Trusted certificate", certificate::summarize(encoding))
+            }
+            SECRET_KEY_TAG if jceks => {
+                // Java writes the sealed key as a serialized object with no
+                // length, so its layout is walked to find the next entry.
+                let (class, rest) = java_serialization::skip_object(reader.remaining).map_err(
+                    |error| match error {
+                        java_serialization::Error::Truncated => Error::Truncated,
+                        _ => Error::Invalid("unsupported secret key encoding in JCEKS data"),
+                    },
+                )?;
+                if class != SEALED_KEY_CLASS {
+                    return Err(Error::Invalid("unsupported secret key type in JCEKS data"));
+                }
+                reader.remaining = rest;
+                ("Secret key", None)
             }
             _ => return Err(Error::UnknownEntryTag(tag)),
         };
@@ -197,12 +230,14 @@ impl<'a> Reader<'a> {
         // Java resolves the type with CertificateFactory (case-insensitively),
         // and standard providers only support X.509. Version 1 implies X.509.
         if version == VERSION_02 && !self.string()?.eq_ignore_ascii_case(CERTIFICATE_TYPE) {
-            return Err(Error::Invalid("unsupported certificate type in JKS data"));
+            return Err(Error::Invalid(
+                "unsupported certificate type in keystore data",
+            ));
         }
         // Java fails to load a keystore whose certificate encoding is empty.
         let encoding = self.payload()?;
         if encoding.is_empty() {
-            return Err(Error::Invalid("empty certificate in JKS data"));
+            return Err(Error::Invalid("empty certificate in keystore data"));
         }
         Ok(encoding)
     }
@@ -212,7 +247,7 @@ impl<'a> Reader<'a> {
         let mut bytes = self.take(len)?;
         // Java's DataInput.readUTF encodes UTF-16 units: NUL uses C0 80 and
         // supplementary characters use two three-byte surrogate sequences.
-        let invalid = || Error::Invalid("invalid modified UTF-8 in JKS string");
+        let invalid = || Error::Invalid("invalid modified UTF-8 in keystore string");
         let mut units = Vec::with_capacity(bytes.len());
         while let Some((&first, rest)) = bytes.split_first() {
             bytes = rest;
@@ -259,8 +294,8 @@ pub fn load_entries(data: &[u8], password: &str) -> Option<Vec<KeystoreEntry>> {
 mod tests {
     use super::*;
     use crate::test_support::{
-        Builder, KEYTOOL_JKS, UNICODE_ALIAS_JKS, UNICODE_PASSWORD_JKS, empty_keystore,
-        fixture_certificate_der, fixture_summary, mixed_keystore,
+        Builder, KEYTOOL_JCEKS, KEYTOOL_JKS, UNICODE_ALIAS_JKS, UNICODE_PASSWORD_JKS,
+        empty_keystore, fixture_certificate_der, fixture_summary, mixed_keystore,
     };
     fn key(alias: &str) -> KeystoreEntry {
         KeystoreEntry {
@@ -529,6 +564,7 @@ mod tests {
             &b"PK"[..],
             &b"not a keystore"[..],
             &b"\x30\x82PKCS12"[..],
+            &b"\xce\xce\xce"[..],
         ] {
             assert!(matches!(parse(data.to_vec()), Err(Error::InvalidMagic)));
         }
@@ -566,6 +602,65 @@ mod tests {
             [fixture_cert("root-cert")]
         );
         assert!(load_entries(&data, "").is_none());
+    }
+
+    #[test]
+    fn reads_a_java_generated_jceks_keystore() {
+        assert!(is_jceks(KEYTOOL_JCEKS));
+        assert!(load_entries(KEYTOOL_JCEKS, "wrong").is_none());
+        assert_eq!(
+            load_entries(KEYTOOL_JCEKS, "changeit").unwrap(),
+            [fixture_cert("root-cert")]
+        );
+    }
+
+    fn secret(alias: &str) -> KeystoreEntry {
+        KeystoreEntry {
+            alias: alias.into(),
+            kind: "Secret key",
+            certificate: None,
+            certificates: vec![],
+            chain_warning: None,
+        }
+    }
+
+    #[test]
+    fn lists_jceks_secret_keys_alongside_other_entries() {
+        for version in [VERSION_01, VERSION_02] {
+            let mut builder = Builder::jceks(version, 4);
+            builder.entry(SECRET_KEY_TAG, b"aes", version, 0);
+            builder.entry(PRIVATE_KEY_TAG, b"key", version, 1);
+            builder.entry(SECRET_KEY_TAG, b"hmac", version, 0);
+            builder.entry(TRUSTED_CERT_TAG, b"cert", version, 1);
+            assert_eq!(
+                load_entries(&builder.finish("changeit"), "changeit").unwrap(),
+                [secret("aes"), cert("cert"), secret("hmac"), key("key")]
+            );
+        }
+    }
+
+    #[test]
+    fn secret_keys_are_jceks_only_and_must_be_sealed_keys() {
+        let mut builder = Builder::new(VERSION_02, 1);
+        builder.entry(SECRET_KEY_TAG, b"aes", VERSION_02, 0);
+        assert_eq!(
+            parse(builder.finish("")).err(),
+            Some(Error::UnknownEntryTag(SECRET_KEY_TAG))
+        );
+        let mut builder = Builder::jceks(VERSION_02, 1);
+        builder.entry(SECRET_KEY_TAG, b"aes", VERSION_02, 0);
+        let data = builder.finish("");
+        let class = data
+            .windows(SEALED_KEY_CLASS.len())
+            .position(|window| window == SEALED_KEY_CLASS)
+            .unwrap();
+        let mut renamed = data.clone();
+        renamed[class] = b'x';
+        let error = parse(renamed).err().unwrap();
+        assert!(error.to_string().contains("secret key type"), "{error}");
+        for end in 0..data.len() {
+            assert!(parse(data[..end].to_vec()).is_err(), "prefix {end}");
+        }
     }
 
     #[test]

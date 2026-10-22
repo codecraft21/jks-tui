@@ -71,6 +71,13 @@ fn java_unicode_keystores_open_through_the_password_prompt() {
             "changeit",
             "certificate-😀",
         ),
+        // Detected by content, so a JCEKS store named .p12 still opens.
+        (
+            "trusted-cert.p12",
+            test_support::KEYTOOL_JCEKS,
+            "changeit",
+            "root-cert",
+        ),
     ] {
         let path = directory.path().join(name);
         fs::write(&path, data).unwrap();
@@ -109,6 +116,11 @@ fn malformed_counts_report_an_error_and_preserve_the_loaded_keystore() {
     assert!(app.password_prompt.is_none());
     assert_eq!(app.keystore_path, Some(original));
     assert!(red_text(&mut app).contains("not a valid JKS keystore"));
+
+    let truncated = directory.path().join("truncated.jceks");
+    fs::write(&truncated, &test_support::KEYTOOL_JCEKS[..20]).unwrap();
+    app.open_file(truncated);
+    assert!(red_text(&mut app).contains("not a valid JCEKS keystore"));
 }
 
 #[test]
@@ -119,6 +131,7 @@ fn browser_shows_directories_then_supported_keystore_files() {
     fs::write(directory.path().join("b-keystore.JKS"), "").unwrap();
     fs::write(directory.path().join("c-keystore.p12"), "").unwrap();
     fs::write(directory.path().join("d-keystore.PFX"), "").unwrap();
+    fs::write(directory.path().join("e-keystore.jceks"), "").unwrap();
     fs::write(directory.path().join("ignored.txt"), "").unwrap();
     fs::write(directory.path().join("ignored.jks.bak"), "").unwrap();
 
@@ -129,6 +142,7 @@ fn browser_shows_directories_then_supported_keystore_files() {
     assert!(rendered.find("a-keystore.jks").unwrap() < rendered.find("b-keystore.JKS").unwrap());
     assert!(rendered.find("b-keystore.JKS").unwrap() < rendered.find("c-keystore.p12").unwrap());
     assert!(rendered.find("c-keystore.p12").unwrap() < rendered.find("d-keystore.PFX").unwrap());
+    assert!(rendered.find("d-keystore.PFX").unwrap() < rendered.find("e-keystore.jceks").unwrap());
     assert!(!rendered.contains("ignored"));
 }
 
@@ -470,7 +484,9 @@ fn a_missing_directory_does_not_close_the_browser() {
 fn empty_directories_and_small_terminals_are_handled() {
     let directory = TestDirectory::new();
     let mut app = browsing(directory.path());
-    assert!(screen(&mut app, 100, 24).contains("No keystore (.jks, .p12, .pfx) or certificate"));
+    assert!(
+        screen(&mut app, 100, 24).contains("No keystore (.jks, .jceks, .p12, .pfx) or certificate")
+    );
     press(&mut app, KeyCode::Up);
     press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Home);
@@ -1172,4 +1188,62 @@ fn details_export_certificates_next_to_the_opened_file() {
             .concat()
     );
     assert!(press(&mut app, KeyCode::Char('q')));
+}
+
+#[test]
+fn weak_certificates_are_flagged_in_the_list_details_and_hierarchy() {
+    use crown::asn1::pem;
+    let directory = TestDirectory::new();
+    let path = directory.path().join("weak.pem");
+    let weak = test_support::sha1_signed_certificate("weak-leaf", "JKS TUI test fixture");
+    let text = [
+        pem::encode("CERTIFICATE", &weak),
+        pem::encode("CERTIFICATE", test_support::fixture_certificate_der()),
+    ]
+    .concat();
+    fs::write(&path, text).unwrap();
+    let mut app = App::default();
+    app.open_file(path);
+    assert_eq!(shown_aliases(&app), ["weak-leaf", "JKS TUI test fixture"]);
+    let yellow = |app: &mut App, width: u16, height: u16| -> String {
+        buffer(app, width, height)
+            .content
+            .iter()
+            .filter(|cell| cell.fg == Color::Yellow)
+            .map(|cell| cell.symbol())
+            .collect()
+    };
+    let list = screen(&mut app, 120, 24);
+    assert!(list.contains("Crypto"), "{list}");
+    // The selected weak row uses the amber highlight; the other row is not weak.
+    assert!(yellow(&mut app, 120, 24).is_empty());
+    press(&mut app, KeyCode::Down);
+    // A styled cell fills its column width.
+    assert_eq!(yellow(&mut app, 120, 24).trim_end(), "Weak");
+    press(&mut app, KeyCode::Up);
+    let rendered = buffer(&mut app, 120, 24);
+    let selected_row = rendered
+        .content
+        .chunks(120)
+        .find(|row| row.iter().any(|cell| cell.symbol() == ">"))
+        .unwrap();
+    let amber: String = selected_row
+        .iter()
+        .filter(|cell| cell.bg == Color::Rgb(255, 175, 0))
+        .map(|cell| cell.symbol())
+        .collect();
+    assert_eq!(amber.trim_end(), "Weak");
+
+    press(&mut app, KeyCode::Enter);
+    let details = screen(&mut app, 120, 50);
+    assert!(
+        details.contains("Weak: signed with SHA-1, which is no longer secure."),
+        "{details}"
+    );
+    assert!(details.contains("CN=weak-leaf [weak]"), "{details}");
+    // The self-signed fixture issuer is not weak.
+    assert!(!details.contains("CN=JKS TUI test fixture [weak]"));
+    press(&mut app, KeyCode::Up);
+    let issuer = screen(&mut app, 120, 50);
+    assert!(!issuer.contains("Weak:"), "{issuer}");
 }
