@@ -1,6 +1,10 @@
 # keystore-tui
 
-A terminal app for inspecting Java keystores. Open a JKS, JCEKS, or PKCS12
+A terminal app for inspecting Java keystores.
+
+![Main screen showing five keystore entries, including one expired certificate](docs/main-screen.png)
+
+Open a JKS, JCEKS, or PKCS12
 (`.jks`, `.jceks`, `.p12`, `.pfx`) file, enter its password, and browse its
 entries and certificates. It also
 opens standalone certificate files (`.pem`, `.crt`, `.cer`, `.der`, `.p7b`,
