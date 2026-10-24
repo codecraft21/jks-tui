@@ -4,6 +4,8 @@ A terminal app for inspecting Java keystores.
 
 ![Main screen showing five keystore entries, including one expired certificate](docs/main-screen.png)
 
+![Details of the selected api-production entry, showing certificate fields and its verified signature](docs/entry-details.png)
+
 Open a JKS, JCEKS, or PKCS12
 (`.jks`, `.jceks`, `.p12`, `.pfx`) file, enter its password, and browse its
 entries and certificates. It also
