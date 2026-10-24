@@ -23,7 +23,7 @@ This file covers how the code is organised and how to work on it.
 | `src/certificate_file.rs` | PEM, DER, and PKCS#7 certificate files (including requests), and chain linking within a file |
 | `src/certificate_request.rs` | PKCS#10 certificate requests: fields, requested extensions, and attributes |
 | `src/file_picker.rs` | The keystore file browser |
-| `src/keystore.rs` | JKS and JCEKS parsing and integrity check (SHA-1); the shared `KeystoreEntry` model |
+| `src/keystore.rs` | JKS and JCEKS parsing and integrity check (SHA-1); the shared `KeystoreEntry` model, whose content is certificates (with their `Kind`) or a request |
 | `src/java_serialization.rs` | Skipping a serialized Java object (a JCEKS secret key) without deserializing it |
 | `src/pkcs12.rs` | PKCS12 parsing, MAC verification, and decryption of safe contents (AES and legacy PBE) |
 | `src/entry_list.rs` | Entry-list filtering, sorting, and expiry classification |
@@ -32,7 +32,9 @@ This file covers how the code is organised and how to work on it.
 | `src/certificate/extensions.rs` | Decoding X.509 extensions into display lines |
 | `src/certificate/security.rs` | Weak key-size and signature-hash checks |
 | `src/certificate/signature.rs` | Checking a certificate's signature with its issuer's public key, and a request's with its own |
-| `src/entry_details.rs` | The full-screen detail view and the certificate hierarchy |
+| `src/entry_details.rs` | The full-screen detail view: layout, keys, export, and shared detail formatting |
+| `src/entry_details/chain.rs` | A stored chain's hierarchy and certificate details |
+| `src/entry_details/request.rs` | A certificate request's details, shown in place of a hierarchy |
 | `src/export.rs` | The export name prompt and writing PEM/DER certificate and request files |
 | `src/test_support.rs`, `src/tests.rs` | Unit-test helpers, synthetic keystores, and tests |
 | `tests/terminal_smoke.py` | PTY smoke tests against the built binary |

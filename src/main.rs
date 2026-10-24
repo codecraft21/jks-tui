@@ -160,7 +160,7 @@ impl App {
                 self.open_file(path);
             }
         } else if let Some(details) = &mut self.entry_details {
-            if details.handle_event(key, &self.entries[details.entry]) {
+            if details.handle_event(key) {
                 self.entry_details = None;
             }
         } else if self.editing_filter {
@@ -176,7 +176,6 @@ impl App {
                             .unwrap_or(Path::new("."))
                             .to_path_buf();
                         self.entry_details = Some(entry_details::EntryDetails::new(
-                            index,
                             &self.entries[index],
                             directory,
                         ));
@@ -362,7 +361,7 @@ impl App {
             && self.file_picker.is_none()
             && let Some(details) = &mut self.entry_details
         {
-            details.draw(frame, &self.entries[details.entry]);
+            details.draw(frame);
             return;
         }
         let [content, status, path_bar, help] = Layout::vertical([
@@ -416,7 +415,8 @@ impl App {
                 let rows = self.visible.iter().enumerate().map(|(position, &index)| {
                     let entry = &self.entries[index];
                     let is_selected = selected == Some(position);
-                    let mut cells = vec![Cell::from(entry.alias.as_str()), Cell::from(entry.kind)];
+                    let mut cells =
+                        vec![Cell::from(entry.alias.as_str()), Cell::from(entry.kind())];
                     match &entry.certificate {
                         Some(summary) => {
                             let expiry = Cell::from(summary.expiry_text());

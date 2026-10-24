@@ -9,7 +9,7 @@ use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
 use super::*;
 use certificate::Summary;
-use keystore::Content;
+use keystore::{Content, Kind};
 use test_support::{
     KEYTOOL_JKS, TestDirectory, UNICODE_ALIAS_JKS, UNICODE_PASSWORD_JKS, empty_keystore,
     fixture_summary, mixed_keystore,
@@ -231,23 +231,29 @@ fn entry_list_shows_certificate_algorithm_key_size_and_expiry() {
         vec![
             KeystoreEntry {
                 alias: "current".into(),
-                kind: "Trusted certificate",
                 certificate: Some(fixture_summary()),
-                content: Content::Certificates(vec![]),
+                content: Content::Certificates {
+                    kind: Kind::TrustedCertificate,
+                    certificates: vec![],
+                },
                 chain_warning: None,
             },
             KeystoreEntry {
                 alias: "expired".into(),
-                kind: "Private key",
                 certificate: Some(expired),
-                content: Content::Certificates(vec![]),
+                content: Content::Certificates {
+                    kind: Kind::PrivateKey,
+                    certificates: vec![],
+                },
                 chain_warning: None,
             },
             KeystoreEntry {
                 alias: "secret".into(),
-                kind: "Secret key",
                 certificate: None,
-                content: Content::Certificates(vec![]),
+                content: Content::Certificates {
+                    kind: Kind::SecretKey,
+                    certificates: vec![],
+                },
                 chain_warning: None,
             },
         ],
@@ -341,9 +347,11 @@ fn partial_pkcs12_warning_persists_with_entries() {
         pkcs12::Verified {
             entries: vec![KeystoreEntry {
                 alias: "readable".into(),
-                kind: "Secret key",
                 certificate: None,
-                content: Content::Certificates(vec![]),
+                content: Content::Certificates {
+                    kind: Kind::SecretKey,
+                    certificates: vec![],
+                },
                 chain_warning: None,
             }],
             incomplete: true,
@@ -654,9 +662,11 @@ fn entry_list_scrolls_to_entries_below_the_viewport() {
         (0..40)
             .map(|index| KeystoreEntry {
                 alias: format!("entry-{index:02}"),
-                kind: "Trusted certificate",
                 certificate: None,
-                content: Content::Certificates(vec![]),
+                content: Content::Certificates {
+                    kind: Kind::TrustedCertificate,
+                    certificates: vec![],
+                },
                 chain_warning: None,
             })
             .collect(),
@@ -763,9 +773,11 @@ fn enter_opens_full_screen_details_and_escape_preserves_list_state() {
         (0..40)
             .map(|i| KeystoreEntry {
                 alias: format!("entry-{i:02}"),
-                kind: "Trusted certificate",
                 certificate: Some(fixture_summary()),
-                content: Content::Certificates(certificates.clone()),
+                content: Content::Certificates {
+                    kind: Kind::TrustedCertificate,
+                    certificates: certificates.clone(),
+                },
                 chain_warning: None,
             })
             .collect(),
@@ -822,9 +834,11 @@ fn enter_handles_empty_lists_and_entries_without_certificates() {
         PathBuf::from("/secret.p12"),
         vec![KeystoreEntry {
             alias: "secret".into(),
-            kind: "Secret key",
             certificate: None,
-            content: Content::Certificates(vec![]),
+            content: Content::Certificates {
+                kind: Kind::SecretKey,
+                certificates: vec![],
+            },
             chain_warning: None,
         }],
     );
@@ -839,12 +853,14 @@ fn enter_handles_empty_lists_and_entries_without_certificates() {
 fn certificate_entry(alias: &str, not_after: Asn1Time) -> KeystoreEntry {
     KeystoreEntry {
         alias: alias.into(),
-        kind: "Trusted certificate",
         certificate: Some(Summary {
             not_after: Some(not_after),
             ..fixture_summary()
         }),
-        content: Content::Certificates(vec![test_support::fixture_certificate_der().to_vec()]),
+        content: Content::Certificates {
+            kind: Kind::TrustedCertificate,
+            certificates: vec![test_support::fixture_certificate_der().to_vec()],
+        },
         chain_warning: None,
     }
 }
@@ -859,9 +875,11 @@ fn triage_app() -> App {
             certificate_entry("beta-quit", date(2035)),
             KeystoreEntry {
                 alias: "gamma".into(),
-                kind: "Secret key",
                 certificate: None,
-                content: Content::Certificates(vec![]),
+                content: Content::Certificates {
+                    kind: Kind::SecretKey,
+                    certificates: vec![],
+                },
                 chain_warning: None,
             },
             certificate_entry("zeta", date(2030)),
@@ -956,9 +974,8 @@ fn enter_opens_the_selected_filtered_entry() {
     screen(&mut app, 100, 20);
     assert_eq!(selected_alias(&app), "zeta");
     press(&mut app, KeyCode::Enter);
-    let details = app.entry_details.as_ref().unwrap();
-    assert_eq!(app.entries[details.entry].alias, "zeta");
-    assert!(screen(&mut app, 120, 40).contains("zeta"));
+    assert!(app.entry_details.is_some());
+    assert!(screen(&mut app, 120, 40).starts_with("zeta — "));
     press(&mut app, KeyCode::Esc);
     assert_eq!(selected_alias(&app), "zeta");
     assert_eq!(app.filter, "ta");
@@ -1168,9 +1185,11 @@ fn details_export_certificates_next_to_the_opened_file() {
         directory.path().join("store.jks"),
         vec![KeystoreEntry {
             alias: "server".into(),
-            kind: "Private key",
             certificate: None,
-            content: Content::Certificates(vec![leaf.clone(), root.clone()]),
+            content: Content::Certificates {
+                kind: Kind::PrivateKey,
+                certificates: vec![leaf.clone(), root.clone()],
+            },
             chain_warning: None,
         }],
     );

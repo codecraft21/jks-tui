@@ -13,7 +13,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     certificate, certificate_file,
-    keystore::{Content, KeystoreEntry},
+    keystore::{Content, KeystoreEntry, Kind},
 };
 
 const MAX_ITERATIONS: u32 = 1_000_000;
@@ -150,9 +150,11 @@ impl Store {
                 );
                 entries.push(KeystoreEntry {
                     alias,
-                    kind: "Private key",
                     certificate: leaf.and_then(certificate::summarize),
-                    content: Content::Certificates(certificates),
+                    content: Content::Certificates {
+                        kind: Kind::PrivateKey,
+                        certificates,
+                    },
                     chain_warning,
                 });
             }
@@ -164,9 +166,11 @@ impl Store {
                     if let Some(alias) = bag.friendly_name() {
                         entries.push(KeystoreEntry {
                             alias,
-                            kind: "Secret key",
                             certificate: None,
-                            content: Content::Certificates(vec![]),
+                            content: Content::Certificates {
+                                kind: Kind::SecretKey,
+                                certificates: vec![],
+                            },
                             chain_warning: None,
                         });
                     } else {
@@ -183,12 +187,14 @@ impl Store {
                         .iter()
                         .any(|attr| attr.oid.matches(TRUSTED_KEY_USAGE))
                     {
-                        if entries.iter().any(|entry| match &entry.content {
-                            Content::Certificates(stored) => {
-                                entry.kind == "Private key"
-                                    && stored.iter().any(|stored| stored == der)
-                            }
-                            Content::Request(_) => false,
+                        if entries.iter().any(|entry| {
+                            matches!(
+                                entry.content,
+                                Content::Certificates {
+                                    kind: Kind::PrivateKey,
+                                    ..
+                                }
+                            ) && entry.certificates().iter().any(|stored| stored == der)
                         }) {
                             continue;
                         }
@@ -202,9 +208,11 @@ impl Store {
                         let (certificates, chain_warning) = certificate::details::chain(der, &pool);
                         entries.push(KeystoreEntry {
                             alias,
-                            kind: certificate_file::KIND,
                             certificate: certificate::summarize(der),
-                            content: Content::Certificates(certificates),
+                            content: Content::Certificates {
+                                kind: Kind::Certificate,
+                                certificates,
+                            },
                             chain_warning,
                         });
                         continue;
@@ -218,9 +226,11 @@ impl Store {
                                 certificate::details::chain(der, &pool);
                             entries.push(KeystoreEntry {
                                 alias,
-                                kind: "Trusted certificate",
                                 certificate: certificate::summarize(der),
-                                content: Content::Certificates(certificates),
+                                content: Content::Certificates {
+                                    kind: Kind::TrustedCertificate,
+                                    certificates,
+                                },
                                 chain_warning,
                             });
                         }
@@ -375,9 +385,11 @@ mod tests {
                 verified.entries,
                 vec![KeystoreEntry {
                     alias: "root-cert".into(),
-                    kind: "Trusted certificate",
                     certificate: Some(fixture_summary()),
-                    content: Content::Certificates(vec![fixture_certificate_der().to_vec()]),
+                    content: Content::Certificates {
+                        kind: Kind::TrustedCertificate,
+                        certificates: vec![fixture_certificate_der().to_vec()],
+                    },
                     chain_warning: None,
                 }]
             );
@@ -395,9 +407,11 @@ mod tests {
                 verified.entries,
                 vec![KeystoreEntry {
                     alias: "JKS TUI test fixture".into(),
-                    kind: certificate_file::KIND,
                     certificate: Some(fixture_summary()),
-                    content: Content::Certificates(vec![fixture_certificate_der().to_vec()]),
+                    content: Content::Certificates {
+                        kind: Kind::Certificate,
+                        certificates: vec![fixture_certificate_der().to_vec()],
+                    },
                     chain_warning: None,
                 }]
             );
@@ -451,16 +465,20 @@ mod tests {
             vec![
                 KeystoreEntry {
                     alias: "private".into(),
-                    kind: "Private key",
                     certificate: None,
-                    content: Content::Certificates(vec![]),
+                    content: Content::Certificates {
+                        kind: Kind::PrivateKey,
+                        certificates: vec![],
+                    },
                     chain_warning: None,
                 },
                 KeystoreEntry {
                     alias: "secret".into(),
-                    kind: "Secret key",
                     certificate: None,
-                    content: Content::Certificates(vec![]),
+                    content: Content::Certificates {
+                        kind: Kind::SecretKey,
+                        certificates: vec![],
+                    },
                     chain_warning: None,
                 },
             ]
@@ -567,9 +585,11 @@ mod tests {
                 verified.entries,
                 vec![KeystoreEntry {
                     alias: "root-cert".into(),
-                    kind: "Trusted certificate",
                     certificate: Some(fixture_summary()),
-                    content: Content::Certificates(vec![fixture_certificate_der().to_vec()]),
+                    content: Content::Certificates {
+                        kind: Kind::TrustedCertificate,
+                        certificates: vec![fixture_certificate_der().to_vec()],
+                    },
                     chain_warning: None,
                 }]
             );
@@ -626,7 +646,7 @@ mod tests {
         );
         assert_eq!(verified.entries[0].chain_warning, None);
         assert_eq!(verified.entries[1].alias, "other");
-        assert_eq!(verified.entries[1].kind, certificate_file::KIND);
+        assert_eq!(verified.entries[1].kind(), "Certificate");
         assert_eq!(verified.entries[1].certificates(), [unrelated]);
     }
 
@@ -658,15 +678,21 @@ mod tests {
         let listed: Vec<_> = verified
             .entries
             .iter()
-            .map(|entry| (entry.alias.as_str(), entry.kind, entry.certificates().len()))
+            .map(|entry| {
+                (
+                    entry.alias.as_str(),
+                    entry.kind(),
+                    entry.certificates().len(),
+                )
+            })
             .collect();
         assert_eq!(
             listed,
             [
-                ("Certificate 1", certificate_file::KIND, 1),
+                ("Certificate 1", "Certificate", 1),
                 ("Private key 1", "Private key", 0),
                 ("leaf", "Private key", 2),
-                ("named", certificate_file::KIND, 1),
+                ("named", "Certificate", 1),
             ]
         );
     }

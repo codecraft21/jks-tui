@@ -12,12 +12,11 @@ use crown::{
 use crate::{
     certificate::{self, details::Details},
     certificate_request,
-    keystore::{Content, KeystoreEntry},
+    keystore::{Content, KeystoreEntry, Kind},
 };
 
 /// File name extensions offered by the file browser alongside keystores.
 pub const EXTENSIONS: &[&str] = &["pem", "crt", "cer", "der", "p7b", "p7c", "csr", "p10"];
-pub const KIND: &str = "Certificate";
 
 pub struct CertificateFile {
     /// In file order.
@@ -176,7 +175,6 @@ fn entries(items: &[Item]) -> Vec<KeystoreEntry> {
                 return KeystoreEntry {
                     alias: certificate_request::subject_name(request)
                         .unwrap_or_else(|| format!("Certificate request {}", index + 1)),
-                    kind: certificate_request::KIND,
                     certificate: certificate_request::summarize(request),
                     content: Content::Request(request.clone()),
                     chain_warning: None,
@@ -198,9 +196,11 @@ fn entries(items: &[Item]) -> Vec<KeystoreEntry> {
             }
             KeystoreEntry {
                 alias: alias(index, der(index)),
-                kind: KIND,
                 certificate: certificate::summarize(der(index)),
-                content: Content::Certificates(chain.iter().map(|&i| der(i).clone()).collect()),
+                content: Content::Certificates {
+                    kind: Kind::Certificate,
+                    certificates: chain.iter().map(|&i| der(i).clone()).collect(),
+                },
                 chain_warning: None,
             }
         })
@@ -257,7 +257,7 @@ mod tests {
         assert_eq!(file.entries.len(), 1);
         assert!(!file.skipped);
         let entry = &file.entries[0];
-        assert_eq!(entry.kind, KIND);
+        assert_eq!(entry.kind(), "Certificate");
         assert_eq!(entry.certificates(), [fixture_certificate_der()]);
         assert!(entry.certificate.is_some());
     }
@@ -331,17 +331,21 @@ mod tests {
         let file = parse(text.as_bytes()).unwrap();
         assert!(!file.skipped);
         assert_eq!(aliases(&file), ["root", "root", "Certificate request 3"]);
-        let kinds: Vec<_> = file.entries.iter().map(|entry| entry.kind).collect();
+        let kinds: Vec<_> = file.entries.iter().map(KeystoreEntry::kind).collect();
         assert_eq!(
             kinds,
-            [certificate_request::KIND, KIND, certificate_request::KIND]
+            [
+                certificate_request::KIND,
+                "Certificate",
+                certificate_request::KIND
+            ]
         );
         assert_eq!(file.entries[0].content, Content::Request(request.clone()));
         assert_eq!(
             file.entries[0].certificate.as_ref().unwrap().algorithm,
             "Ed25519"
         );
-        assert_eq!(file.entries[1].content, Content::Certificates(vec![root]));
+        assert_eq!(file.entries[1].certificates(), [root]);
 
         let keytool = parse(KEYTOOL_REQUEST).unwrap();
         assert_eq!(aliases(&keytool), ["CSR TUI test fixture"]);
