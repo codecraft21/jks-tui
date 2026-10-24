@@ -159,7 +159,7 @@ fn invalid() -> CryptoError {
 }
 
 /// Certificate strings could otherwise move the cursor or restyle the terminal.
-fn printable(text: &str) -> String {
+pub(crate) fn printable(text: &str) -> String {
     text.chars()
         .map(|ch| {
             if ch.is_control() {

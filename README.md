@@ -4,7 +4,7 @@ A terminal app for inspecting Java keystores. Open a JKS, JCEKS, or PKCS12
 (`.jks`, `.jceks`, `.p12`, `.pfx`) file, enter its password, and browse its
 entries and certificates. It also
 opens standalone certificate files (`.pem`, `.crt`, `.cer`, `.der`, `.p7b`,
-`.p7c`).
+`.p7c`) and certificate signing requests (`.csr`, `.p10`).
 
 - Lists every entry with its type (private key, trusted certificate, or secret
   key), public key algorithm, key size, and expiry date. Certificates expiring
@@ -14,7 +14,9 @@ opens standalone certificate files (`.pem`, `.crt`, `.cer`, `.der`, `.p7b`,
 - Filters entries by alias or subject, and sorts them by alias or expiry date.
 - Shows each certificate's full details, including decoded extensions, and its
   certificate hierarchy, with each signature checked against the issuer's key.
-- Exports a certificate or a whole chain to a new PEM or DER file.
+- Shows a certificate signing request's subject, public key, requested
+  extensions, and attributes, and checks its signature with its own key.
+- Exports a certificate, a whole chain, or a request to a new PEM or DER file.
 - Detects the format from the file content, so a PKCS12 store renamed `.jks`
   still opens.
 - Opens PKCS12 files made by Java, OpenSSL, and other tools. Keys without a
@@ -38,8 +40,9 @@ cargo run --locked
 
 Press `o` (or `Ctrl+O`) to open the file browser. It starts in the working
 directory, or in the current file's directory when you open another file. It
-shows directories first, then keystores (`.jks`, `.jceks`, `.p12`, `.pfx`) and
-certificate files (`.pem`, `.crt`, `.cer`, `.der`, `.p7b`, `.p7c`).
+shows directories first, then keystores (`.jks`, `.jceks`, `.p12`, `.pfx`),
+certificate files (`.pem`, `.crt`, `.cer`, `.der`, `.p7b`, `.p7c`), and
+certificate requests (`.csr`, `.p10`).
 
 | Key | Action in the file browser |
 | --- | --- |
@@ -59,8 +62,9 @@ password prompt keeps the keystore that was already open.
 A certificate file opens without a password. Each certificate in it, in PEM,
 DER, or PKCS#7 form, is listed as a `Certificate` entry in file order, named by
 its subject common name. Its hierarchy is built from the other certificates in
-the same file. Private keys and other non-certificate PEM blocks are not read; a
-yellow warning says when some were present.
+the same file. Certificate signing requests (PKCS#10), in PEM or DER, open the
+same way and are listed as `Certificate request` entries. Private keys and
+other PEM blocks are not read; a yellow warning says when some were present.
 
 ### Entry list
 
@@ -71,10 +75,10 @@ entry count, any filter, and the sort order.
 | Column | Shows |
 | --- | --- |
 | Alias | The entry alias |
-| Type | Private key, Trusted certificate, Secret key, or Certificate |
+| Type | Private key, Trusted certificate, Secret key, Certificate, or Certificate request |
 | Algorithm | The certificate's public key algorithm (RSA, EC, DSA, Ed25519, ...) |
 | Key size | The key size in bits (RSA/DSA modulus, EC curve size) |
-| Expires | The certificate's expiry date (UTC): yellow within 30 days of expiry, red once it has passed |
+| Expires | The certificate's expiry date (UTC): yellow within 30 days of expiry, red once it has passed; `-` for a request |
 | Crypto | `Weak`, in yellow, when the certificate's key is too short or its signature uses a broken hash |
 
 | Key | Action in the entry list |
@@ -122,7 +126,7 @@ explain the result below the signature algorithm.
 | `Up` / `Down` or `k` / `j` | Select a certificate or scroll the focused details |
 | `PageUp` / `PageDown`, `Home` / `End` | Scroll details by a page or to the start / end |
 | `f` | Toggle SHA-256 / SHA-1 fingerprints; kept while switching certificates |
-| `x` | Export the selected certificate |
+| `x` | Export the selected certificate, or the certificate request |
 | `X` | Export the entry's whole chain, leaf first |
 | `Esc` | Return to the entry list, preserving its selection and scroll position |
 | `q` / `Ctrl+C` | Quit |
@@ -131,12 +135,24 @@ The hierarchy only shows certificates stored in the keystore. It does not fetch
 missing issuers or check whether a certificate is trusted: a verified signature
 only means the stored issuer's key made it, not that the chain is valid.
 
+### Certificate requests
+
+A certificate request opens in the same view. The top pane shows the request
+instead of a hierarchy, and the details show its version, subject, public key,
+signature algorithm, fingerprint, requested extensions (decoded like a
+certificate's), and any other attributes. A challenge password is reported as
+present but never shown. The signature is checked with the request's own public
+key: `[verified]` means the request is intact and was signed with the matching
+private key. Short keys are flagged as weak; the request's signature hash is not,
+because it does not carry into the issued certificate. The details pane has
+focus, so `Up` / `Down` scroll it, and `x` exports the request.
+
 ### Exporting certificates
 
 Press `x` or `X` in the detail view, then edit the suggested file name and press
 `Enter`. The suggestion is `<alias>.pem` (or `<alias>-chain.pem`) next to the
-open file. A name ending in `.der` saves a single certificate as DER; any other
-name saves PEM. Relative names are saved next to the open file. Every key,
+open file, or `<alias>.csr` for a certificate request. A name ending in `.der`
+saves a single certificate or the request as DER; any other name saves PEM. Relative names are saved next to the open file. Every key,
 including `q`, is typed into the name; `Backspace` deletes a character,
 `Ctrl+U` clears the name, and `Esc` cancels. Existing files are never replaced:
 the save fails with a red message and you can choose another name.

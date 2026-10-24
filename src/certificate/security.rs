@@ -54,21 +54,7 @@ pub fn weaknesses(
     signature: &ObjectIdentifier,
     self_signed: bool,
 ) -> Vec<Weakness> {
-    let mut found = Vec::new();
-    let minimum = match algorithm {
-        "RSA" | "RSASSA-PSS" | "DSA" => Some(MINIMUM_RSA_DSA_BITS),
-        "EC" => Some(MINIMUM_EC_BITS),
-        _ => None,
-    };
-    if let (Some(minimum), Some(bits)) = (minimum, key_size)
-        && bits < minimum
-    {
-        found.push(Weakness::ShortKey {
-            algorithm: algorithm.into(),
-            bits,
-            minimum,
-        });
-    }
+    let mut found: Vec<_> = key_weakness(algorithm, key_size).into_iter().collect();
     if !self_signed
         && let Some((_, hash)) = WEAK_SIGNATURES
             .iter()
@@ -77,6 +63,21 @@ pub fn weaknesses(
         found.push(Weakness::WeakSignature(hash));
     }
     found
+}
+
+/// Whether a key of this algorithm and size is too short.
+pub fn key_weakness(algorithm: &str, key_size: Option<u32>) -> Option<Weakness> {
+    let minimum = match algorithm {
+        "RSA" | "RSASSA-PSS" | "DSA" => MINIMUM_RSA_DSA_BITS,
+        "EC" => MINIMUM_EC_BITS,
+        _ => return None,
+    };
+    let bits = key_size.filter(|&bits| bits < minimum)?;
+    Some(Weakness::ShortKey {
+        algorithm: algorithm.into(),
+        bits,
+        minimum,
+    })
 }
 
 #[cfg(test)]

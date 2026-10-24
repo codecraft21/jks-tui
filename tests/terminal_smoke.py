@@ -322,6 +322,30 @@ class TerminalSmoke(unittest.TestCase):
     def test_certificate_file_export_then_ctrl_c_restores_terminal(self):
         self.certificate_file(b"\x03")
 
+    def test_certificate_request_export_then_quit_restores_terminal(self):
+        request = (ROOT / "tests/fixtures/keytool-request.csr").read_text()
+        with tempfile.TemporaryDirectory(prefix="terminal-check-", dir=ROOT / "target") as directory:
+            Path(directory, "server.csr").write_text(request)
+            with PtyApp(self.binary, directory) as app:
+                app.expect("No keystore selected")
+                app.send(b"o")
+                app.expect("server.csr")
+                app.send(b"\x1b[B")  # Skip the parent-directory row.
+                app.send(b"\r")
+                app.expect("CSR TUI test fixture", "Certificate request", "1 entries | Sort: alias")
+                app.send(b"\r")
+                app.expect("Request details", "[verified]", "x Export request")
+                app.send(b"x")
+                app.expect("Save certificate request to:")
+                app.send(b"\x15")  # Ctrl+U clears the suggested absolute path.
+                app.send(b"q.csr\r")
+                app.expect("Saved certificate request to")
+                saved = Path(directory, "q.csr").read_text()
+                self.assertTrue(saved.startswith("-----BEGIN CERTIFICATE REQUEST-----\n"))
+                self.assertEqual(pem_der(saved), pem_der(request))
+                app.send(b"q")
+                app.assert_restored(self)
+
 
 def fixture_certificate():
     """The DER certificate stored in the public fixture under `root-cert`."""
@@ -335,6 +359,13 @@ def certificate_pem(der):
     body = base64.b64encode(der).decode()
     lines = [body[i : i + 64] for i in range(0, len(body), 64)]
     return "-----BEGIN CERTIFICATE-----\n" + "\n".join(lines) + "\n-----END CERTIFICATE-----\n"
+
+
+def pem_der(text):
+    """The DER inside a single PEM block, whatever its label."""
+    body = [line for line in text.splitlines() if line and not line.startswith("-----")]
+    return base64.b64decode("".join(body))
+
 
 def triage_keystore():
     """Build an empty-password JKS with three copies of the public fixture

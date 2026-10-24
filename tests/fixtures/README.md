@@ -102,3 +102,29 @@ openssl pkcs12 -export -legacy -nokeys -in fixture.pem \
   -out openssl-cert-legacy.p12 -passout pass:changeit
 rm fixture.pem
 ```
+
+`keytool-request.csr` and `openssl-request.der` are certificate signing
+requests. The first is a PEM request from `keytool -certreq` for a P-256 key,
+with Subject Alternative Name and Extended Key Usage extensions. The second is
+a DER request from OpenSSL for an RSA 2048 key with a Subject Alternative Name.
+Their private keys exist only in a temporary directory while the requests are
+made. Recreate them from this directory with:
+
+```sh
+key_dir=$(mktemp -d)
+keytool -genkeypair -alias request-key \
+  -dname 'CN=CSR TUI test fixture, O=keystore-tui' -keyalg EC \
+  -groupname secp256r1 -storetype PKCS12 -keystore "$key_dir/key.p12" \
+  -storepass changeit
+keytool -certreq -alias request-key -keystore "$key_dir/key.p12" \
+  -storepass changeit -ext 'SAN=dns:csr.example.test,ip:192.0.2.1' \
+  -ext 'EKU=serverAuth' -file keytool-request.csr
+openssl req -new -newkey rsa:2048 -nodes -keyout "$key_dir/key.pem" \
+  -subj '/CN=OpenSSL CSR fixture' \
+  -addext 'subjectAltName=DNS:openssl.example.test' -outform DER \
+  -out openssl-request.der
+rm -r "$key_dir"
+```
+
+Tests that need other attributes, such as a challenge password, build requests
+in memory with a synthetic Ed25519 key.

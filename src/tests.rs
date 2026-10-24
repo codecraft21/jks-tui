@@ -222,7 +222,7 @@ fn pkcs12_renamed_as_jks_opens_after_password_verification() {
 fn entry_list_shows_certificate_algorithm_key_size_and_expiry() {
     let mut app = App::default();
     let expired = Summary {
-        not_after: Asn1Time::new(2001, 2, 3, 0, 0, 0, true).unwrap(),
+        not_after: Some(Asn1Time::new(2001, 2, 3, 0, 0, 0, true).unwrap()),
         ..fixture_summary()
     };
     app.show_entries(
@@ -234,6 +234,7 @@ fn entry_list_shows_certificate_algorithm_key_size_and_expiry() {
                 certificate: Some(fixture_summary()),
                 certificates: vec![],
                 chain_warning: None,
+                request: None,
             },
             KeystoreEntry {
                 alias: "expired".into(),
@@ -241,6 +242,7 @@ fn entry_list_shows_certificate_algorithm_key_size_and_expiry() {
                 certificate: Some(expired),
                 certificates: vec![],
                 chain_warning: None,
+                request: None,
             },
             KeystoreEntry {
                 alias: "secret".into(),
@@ -248,6 +250,7 @@ fn entry_list_shows_certificate_algorithm_key_size_and_expiry() {
                 certificate: None,
                 certificates: vec![],
                 chain_warning: None,
+                request: None,
             },
         ],
     );
@@ -344,6 +347,7 @@ fn partial_pkcs12_warning_persists_with_entries() {
                 certificate: None,
                 certificates: vec![],
                 chain_warning: None,
+                request: None,
             }],
             incomplete: true,
         },
@@ -657,6 +661,7 @@ fn entry_list_scrolls_to_entries_below_the_viewport() {
                 certificate: None,
                 certificates: vec![],
                 chain_warning: None,
+                request: None,
             })
             .collect(),
     );
@@ -766,6 +771,7 @@ fn enter_opens_full_screen_details_and_escape_preserves_list_state() {
                 certificate: Some(fixture_summary()),
                 certificates: certificates.clone(),
                 chain_warning: None,
+                request: None,
             })
             .collect(),
     );
@@ -825,6 +831,7 @@ fn enter_handles_empty_lists_and_entries_without_certificates() {
             certificate: None,
             certificates: vec![],
             chain_warning: None,
+            request: None,
         }],
     );
     press(&mut app, KeyCode::Enter);
@@ -840,11 +847,12 @@ fn certificate_entry(alias: &str, not_after: Asn1Time) -> KeystoreEntry {
         alias: alias.into(),
         kind: "Trusted certificate",
         certificate: Some(Summary {
-            not_after,
+            not_after: Some(not_after),
             ..fixture_summary()
         }),
         certificates: vec![test_support::fixture_certificate_der().to_vec()],
         chain_warning: None,
+        request: None,
     }
 }
 
@@ -862,6 +870,7 @@ fn triage_app() -> App {
                 certificate: None,
                 certificates: vec![],
                 chain_warning: None,
+                request: None,
             },
             certificate_entry("zeta", date(2030)),
         ],
@@ -1018,7 +1027,7 @@ fn expiring_soon_dates_use_a_readable_warning_color() {
         .as_secs() as i64;
     let soon = Asn1Time::from_unix(now + 10 * 24 * 60 * 60, false);
     let soon_text = Summary {
-        not_after: soon,
+        not_after: Some(soon),
         ..fixture_summary()
     }
     .expiry_text();
@@ -1109,14 +1118,49 @@ fn certificate_files_open_without_a_prompt_in_file_order() {
 }
 
 #[test]
+fn certificate_requests_open_without_a_prompt_or_expiry() {
+    let directory = TestDirectory::new();
+    let path = directory.path().join("server.csr");
+    fs::write(&path, test_support::KEYTOOL_REQUEST).unwrap();
+    // A DER request is recognised by content even without a known name.
+    let der_path = directory.path().join("unnamed");
+    fs::write(&der_path, test_support::OPENSSL_REQUEST_DER).unwrap();
+
+    let mut app = App::default();
+    app.open_file(path);
+    assert!(app.password_prompt.is_none());
+    assert!(app.error.is_none());
+    assert_eq!(shown_aliases(&app), ["CSR TUI test fixture"]);
+    let rendered = screen(&mut app, 120, 24);
+    let row = rendered
+        .lines()
+        .find(|line| line.contains("CSR TUI test fixture"))
+        .unwrap();
+    for column in ["Certificate request", "EC", "256 bits", " - "] {
+        assert!(row.contains(column), "missing {column:?} in {row}");
+    }
+    press(&mut app, KeyCode::Char('s'));
+    assert_eq!(shown_aliases(&app), ["CSR TUI test fixture"]);
+    press(&mut app, KeyCode::Enter);
+    let details = screen(&mut app, 120, 50);
+    assert!(details.contains("CN=CSR TUI test fixture [verified]"));
+    assert!(details.contains("Requested extensions:"));
+    press(&mut app, KeyCode::Esc);
+
+    app.open_file(der_path);
+    assert!(app.error.is_none());
+    assert_eq!(shown_aliases(&app), ["OpenSSL CSR fixture"]);
+}
+
+#[test]
 fn browser_lists_certificate_files() {
     let directory = TestDirectory::new();
-    for name in ["a.pem", "b.CER", "c.p7b", "d.txt"] {
+    for name in ["a.pem", "b.CER", "c.p7b", "d.txt", "e.csr", "f.P10"] {
         fs::write(directory.path().join(name), b"").unwrap();
     }
     let mut app = browsing(directory.path());
     let rendered = screen(&mut app, 100, 24);
-    for name in ["a.pem", "b.CER", "c.p7b"] {
+    for name in ["a.pem", "b.CER", "c.p7b", "e.csr", "f.P10"] {
         assert!(rendered.contains(name), "missing {name}");
     }
     assert!(!rendered.contains("d.txt"));
@@ -1136,6 +1180,7 @@ fn details_export_certificates_next_to_the_opened_file() {
             certificate: None,
             certificates: vec![leaf.clone(), root.clone()],
             chain_warning: None,
+            request: None,
         }],
     );
     press(&mut app, KeyCode::Enter);

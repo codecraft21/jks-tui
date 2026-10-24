@@ -16,6 +16,8 @@ pub const KEYTOOL_JKS: &[u8] = include_bytes!("../tests/fixtures/trusted-cert.jk
 pub const UNICODE_PASSWORD_JKS: &[u8] = include_bytes!("../tests/fixtures/unicode-password.jks");
 pub const UNICODE_ALIAS_JKS: &[u8] = include_bytes!("../tests/fixtures/unicode-alias.jks");
 pub const KEYTOOL_JCEKS: &[u8] = include_bytes!("../tests/fixtures/trusted-cert.jceks");
+pub const KEYTOOL_REQUEST: &[u8] = include_bytes!("../tests/fixtures/keytool-request.csr");
+pub const OPENSSL_REQUEST_DER: &[u8] = include_bytes!("../tests/fixtures/openssl-request.der");
 
 /// The DER certificate stored in `KEYTOOL_JKS` under the alias `root-cert`.
 pub fn fixture_certificate_der() -> &'static [u8] {
@@ -31,7 +33,7 @@ pub fn fixture_summary() -> Summary {
         subject: "CN=JKS TUI test fixture".into(),
         algorithm: "EC".into(),
         key_size: Some(256),
-        not_after: Asn1Time::new(2036, 10, 9, 19, 48, 29, true).unwrap(),
+        not_after: Some(Asn1Time::new(2036, 10, 9, 19, 48, 29, true).unwrap()),
         weaknesses: vec![],
     }
 }
@@ -259,6 +261,31 @@ pub fn ed25519_certificate(subject: &str, issuer: &str, key: u8, issuer_key: u8)
     );
     let signature = ed25519::sign(&[issuer_key; 32], &tbs);
     der::sequence(&[tbs, algorithm, der::bit_string(0, &signature)].concat())
+}
+
+/// A certificate request with these attributes and an Ed25519 key made from
+/// the synthetic secret `[7; 32]`, signed with that key.
+pub fn ed25519_request(subject: &str, attributes: &[Vec<u8>]) -> Vec<u8> {
+    use crown::{
+        asn1::{der, oid::ObjectIdentifier},
+        ed25519,
+        x509::name::Name,
+    };
+    let algorithm = der::sequence(&der::oid(
+        &ObjectIdentifier::new(&[1, 3, 101, 112]).unwrap(),
+    ));
+    let public = ed25519::public_from_secret(&[7; 32]);
+    let info = der::sequence(
+        &[
+            der::integer_i64(0),
+            Name::from_common_name(subject).encode(),
+            der::sequence(&[algorithm.clone(), der::bit_string(0, &public)].concat()),
+            der::implicit(0, true, &attributes.concat()),
+        ]
+        .concat(),
+    );
+    let signature = ed25519::sign(&[7; 32], &info);
+    der::sequence(&[info, algorithm, der::bit_string(0, &signature)].concat())
 }
 
 /// A JCEKS secret key in the serialized `SealedObject` layout Java writes,

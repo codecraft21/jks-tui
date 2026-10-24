@@ -37,10 +37,14 @@ pub enum ExpiryStatus {
     Expired,
 }
 
+/// Certificate requests, which have no expiry date, are `Valid`.
 pub fn expiry_status(summary: &Summary, now: i64) -> ExpiryStatus {
     if summary.is_expired(now) {
         ExpiryStatus::Expired
-    } else if summary.not_after.to_unix() <= now.saturating_add(EXPIRY_WARNING_SECONDS) {
+    } else if summary
+        .not_after
+        .is_some_and(|time| time.to_unix() <= now.saturating_add(EXPIRY_WARNING_SECONDS))
+    {
         ExpiryStatus::ExpiringSoon
     } else {
         ExpiryStatus::Valid
@@ -73,7 +77,8 @@ pub fn visible_entries(entries: &[KeystoreEntry], filter: &str, order: SortOrder
             entries[index]
                 .certificate
                 .as_ref()
-                .map_or((true, 0), |summary| (false, summary.not_after.to_unix()))
+                .and_then(|summary| summary.not_after)
+                .map_or((true, 0), |time| (false, time.to_unix()))
         });
     }
     visible
@@ -90,11 +95,12 @@ mod tests {
             alias: alias.into(),
             kind: "Trusted certificate",
             certificate: expiry.map(|(year, month, day)| Summary {
-                not_after: Asn1Time::new(year, month, day, 0, 0, 0, true).unwrap(),
+                not_after: Some(Asn1Time::new(year, month, day, 0, 0, 0, true).unwrap()),
                 ..fixture_summary()
             }),
             certificates: vec![],
             chain_warning: None,
+            request: None,
         }
     }
 
@@ -152,7 +158,7 @@ mod tests {
     #[test]
     fn classifies_expiry_with_a_thirty_day_warning_window() {
         let summary = fixture_summary();
-        let expiry = summary.not_after.to_unix();
+        let expiry = summary.not_after.unwrap().to_unix();
         for (now, status) in [
             (expiry - EXPIRY_WARNING_SECONDS - 1, ExpiryStatus::Valid),
             (expiry - EXPIRY_WARNING_SECONDS, ExpiryStatus::ExpiringSoon),

@@ -1,6 +1,7 @@
-//! Standalone certificate files: PEM or DER certificates and PKCS#7 bundles.
-//! Each certificate becomes one entry; its chain is assembled from the other
-//! certificates in the same file by matching issuer and subject names.
+//! Standalone certificate files: PEM or DER certificates, PKCS#7 bundles, and
+//! PKCS#10 certificate requests. Each certificate or request becomes one
+//! entry; a certificate's chain is assembled from the other certificates in
+//! the same file by matching issuer and subject names.
 use crown::{
     asn1::{Reader, der, oid, pem},
     error::CryptoError,
@@ -10,18 +11,26 @@ use crown::{
 
 use crate::{
     certificate::{self, details::Details},
+    certificate_request,
     keystore::KeystoreEntry,
 };
 
 /// File name extensions offered by the file browser alongside keystores.
-pub const EXTENSIONS: &[&str] = &["pem", "crt", "cer", "der", "p7b", "p7c"];
+pub const EXTENSIONS: &[&str] = &["pem", "crt", "cer", "der", "p7b", "p7c", "csr", "p10"];
 pub const KIND: &str = "Certificate";
 
 pub struct CertificateFile {
     /// In file order.
     pub entries: Vec<KeystoreEntry>,
-    /// Whether PEM blocks other than certificates, such as private keys, were ignored.
+    /// Whether PEM blocks other than certificates and requests, such as
+    /// private keys, were ignored.
     pub skipped: bool,
+}
+
+/// A certificate or request in file order, as exact DER.
+enum Item {
+    Certificate(Vec<u8>),
+    Request(Vec<u8>),
 }
 
 pub fn is_pem(data: &[u8]) -> bool {
@@ -37,49 +46,67 @@ pub fn has_extension(path: &std::path::Path) -> bool {
 }
 
 pub fn parse(data: &[u8]) -> Result<CertificateFile, &'static str> {
-    let mut certificates = Vec::new();
+    let mut items = Vec::new();
     let mut skipped = false;
     if is_pem(data) {
         let text = std::str::from_utf8(data).map_err(|_| "PEM file is not valid UTF-8 text")?;
         for block in pem::parse(text).map_err(|_| "malformed PEM block")? {
             match block.label.as_str() {
-                "CERTIFICATE" | "X509 CERTIFICATE" => certificates.push(block.data),
+                "CERTIFICATE" | "X509 CERTIFICATE" => items.push(Item::Certificate(block.data)),
                 // OpenSSL appends trust settings after the certificate.
-                "TRUSTED CERTIFICATE" => certificates.push(
+                "TRUSTED CERTIFICATE" => items.push(Item::Certificate(
                     Reader::new(&block.data)
                         .read_raw_tlv()
                         .map_err(|_| "malformed trusted certificate")?
                         .to_vec(),
+                )),
+                // Java's keytool writes the older "NEW" label.
+                "CERTIFICATE REQUEST" | "NEW CERTIFICATE REQUEST" => {
+                    items.push(Item::Request(block.data))
+                }
+                "PKCS7" | "CMS" => items.extend(
+                    pkcs7_certificates(&block.data)?
+                        .into_iter()
+                        .map(Item::Certificate),
                 ),
-                "PKCS7" | "CMS" => certificates.extend(pkcs7_certificates(&block.data)?),
                 _ => skipped = true,
             }
         }
-    } else if is_der_certificate(data) {
-        certificates.push(data.to_vec());
+    } else if let Some(item) = single_der_item(data) {
+        items.push(item);
     } else {
-        certificates = pkcs7_certificates(data)?;
+        items = pkcs7_certificates(data)?
+            .into_iter()
+            .map(Item::Certificate)
+            .collect();
     }
-    if certificates.is_empty() {
-        return Err("the file contains no certificates");
+    if items.is_empty() {
+        return Err("the file contains no certificates or certificate requests");
     }
     Ok(CertificateFile {
-        entries: entries(&certificates),
+        entries: entries(&items),
         skipped,
     })
 }
 
-/// A single, complete DER element that reads as a certificate.
-fn is_der_certificate(data: &[u8]) -> bool {
-    Reader::new(data)
-        .read_raw_tlv()
-        .is_ok_and(|tlv| tlv.len() == data.len())
-        && certificate::summarize(data).is_some()
+/// A certificate or request that is exactly one DER element.
+fn single_der_item(data: &[u8]) -> Option<Item> {
+    let tlv = Reader::new(data).read_raw_tlv().ok()?;
+    if tlv.len() != data.len() {
+        None
+    } else if certificate::summarize(data).is_some() {
+        Some(Item::Certificate(data.to_vec()))
+    } else if certificate_request::summarize(data).is_some() {
+        Some(Item::Request(data.to_vec()))
+    } else {
+        None
+    }
 }
 
 /// The X.509 certificates of a PKCS#7 SignedData, as exact DER.
 fn pkcs7_certificates(data: &[u8]) -> Result<Vec<Vec<u8>>, &'static str> {
-    let info = ContentInfo::parse(data).map_err(|_| "not a certificate or PKCS#7 file")?;
+    let info = ContentInfo::parse(data)
+        .map_err(|_| "not a certificate, certificate request, or PKCS#7 file")?;
     if !info.content_type.matches(oid::OID_PKCS7_SIGNED_DATA) {
         return Err("PKCS#7 content is not signed data");
     }
@@ -131,10 +158,31 @@ fn name_key(raw: &[u8]) -> Vec<u8> {
     )
 }
 
-fn entries(certificates: &[Vec<u8>]) -> Vec<KeystoreEntry> {
-    let names: Vec<_> = certificates.iter().map(|der| names(der)).collect();
-    (0..certificates.len())
+fn entries(items: &[Item]) -> Vec<KeystoreEntry> {
+    // Requests have no issuer and are never part of a chain.
+    let names: Vec<_> = items
+        .iter()
+        .map(|item| match item {
+            Item::Certificate(der) => names(der),
+            Item::Request(_) => None,
+        })
+        .collect();
+    let der = |index: usize| match &items[index] {
+        Item::Certificate(der) | Item::Request(der) => der,
+    };
+    (0..items.len())
         .map(|index| {
+            if let Item::Request(request) = &items[index] {
+                return KeystoreEntry {
+                    alias: certificate_request::subject_name(request)
+                        .unwrap_or_else(|| format!("Certificate request {}", index + 1)),
+                    kind: certificate_request::KIND,
+                    certificate: certificate_request::summarize(request),
+                    certificates: Vec::new(),
+                    chain_warning: None,
+                    request: Some(request.clone()),
+                };
+            }
             // Follow issuers through the file, stopping at a self-issued
             // certificate, a missing issuer, or a certificate already used.
             let mut chain = vec![index];
@@ -149,13 +197,13 @@ fn entries(certificates: &[Vec<u8>]) -> Vec<KeystoreEntry> {
             {
                 chain.push(next);
             }
-            let der = &certificates[index];
             KeystoreEntry {
-                alias: alias(index, der),
+                alias: alias(index, der(index)),
                 kind: KIND,
-                certificate: certificate::summarize(der),
-                certificates: chain.iter().map(|&i| certificates[i].clone()).collect(),
+                certificate: certificate::summarize(der(index)),
+                certificates: chain.iter().map(|&i| der(i).clone()).collect(),
                 chain_warning: None,
+                request: None,
             }
         })
         .collect()
@@ -170,12 +218,7 @@ fn alias(index: usize, der: &[u8]) -> String {
 pub fn subject_name(der: &[u8]) -> Option<String> {
     Details::parse(der)
         .ok()
-        .and_then(|info| {
-            info.subject
-                .common_name()
-                .or_else(|| Some(info.subject.to_string()))
-        })
-        .filter(|name| !name.is_empty())
+        .and_then(|info| certificate::name_alias(&info.subject))
 }
 
 #[cfg(test)]
@@ -273,6 +316,45 @@ mod tests {
             assert_eq!(aliases(&file), ["leaf", "root"]);
             assert_eq!(file.entries[0].certificates, [leaf.clone(), root.clone()]);
         }
+    }
+
+    #[test]
+    fn requests_are_listed_in_file_order_outside_chains() {
+        use crate::test_support::{KEYTOOL_REQUEST, OPENSSL_REQUEST_DER, ed25519_request};
+        let root = metadata_certificate("root", "root", &[1], &[]);
+        let request = ed25519_request("root", &[]);
+        let unnamed = ed25519_request("", &[]);
+        let text = [
+            pem::encode("CERTIFICATE REQUEST", &request),
+            pem::encode("CERTIFICATE", &root),
+            pem::encode("NEW CERTIFICATE REQUEST", &unnamed),
+        ]
+        .concat();
+        let file = parse(text.as_bytes()).unwrap();
+        assert!(!file.skipped);
+        assert_eq!(aliases(&file), ["root", "root", "Certificate request 3"]);
+        let kinds: Vec<_> = file.entries.iter().map(|entry| entry.kind).collect();
+        assert_eq!(
+            kinds,
+            [certificate_request::KIND, KIND, certificate_request::KIND]
+        );
+        assert_eq!(file.entries[0].request.as_deref(), Some(&request[..]));
+        assert!(file.entries[0].certificates.is_empty());
+        assert_eq!(
+            file.entries[0].certificate.as_ref().unwrap().algorithm,
+            "Ed25519"
+        );
+        assert_eq!(file.entries[1].certificates, [root]);
+        assert_eq!(file.entries[1].request, None);
+
+        let keytool = parse(KEYTOOL_REQUEST).unwrap();
+        assert_eq!(aliases(&keytool), ["CSR TUI test fixture"]);
+        let openssl = parse(OPENSSL_REQUEST_DER).unwrap();
+        assert_eq!(aliases(&openssl), ["OpenSSL CSR fixture"]);
+        assert_eq!(
+            openssl.entries[0].request.as_deref(),
+            Some(OPENSSL_REQUEST_DER)
+        );
     }
 
     #[test]

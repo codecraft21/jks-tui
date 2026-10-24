@@ -1,5 +1,6 @@
 mod certificate;
 mod certificate_file;
+mod certificate_request;
 mod entry_details;
 mod entry_list;
 mod export;
@@ -102,8 +103,7 @@ struct App {
 }
 
 const INCOMPLETE_WARNING: &str = "Warning: this PKCS12 entry list is incomplete.";
-const SKIPPED_WARNING: &str =
-    "Warning: PEM blocks other than certificates, such as private keys, were not read.";
+const SKIPPED_WARNING: &str = "Warning: PEM blocks other than certificates and certificate requests, such as private keys, were not read.";
 
 enum Loaded {
     Store(Store),
@@ -486,7 +486,7 @@ impl App {
         } else {
             frame.render_widget(
                 Paragraph::new(
-                    "No keystore selected.\n\nPress o to open a keystore (.jks, .jceks, .p12, .pfx) or a certificate file (.pem, .crt, .cer, .der, .p7b, .p7c).",
+                    "No keystore selected.\n\nPress o to open a keystore (.jks, .jceks, .p12, .pfx) or a certificate or request file (.pem, .crt, .cer, .der, .p7b, .p7c, .csr, .p10).",
                 )
                 .block(Block::bordered().title(" keystore-tui ".blue()))
                 .wrap(Wrap { trim: false }),
