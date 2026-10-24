@@ -1,4 +1,5 @@
 //! Full-screen, read-only entry inspection, independent of the entry table state.
+//! A certificate request entry shows the request in place of a hierarchy.
 use std::{
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
@@ -17,26 +18,112 @@ use crate::{
     certificate::{
         self,
         details::{Details, fingerprint, time_text},
+        extensions::Extension,
         signature::{self, Signature},
     },
+    certificate_request::{self, Request},
     export::{self, ExportPrompt, Outcome, Scope},
     keystore::KeystoreEntry,
 };
 
 /// An indented section; each extension's title is followed by its decoded values.
-fn extensions_text(info: &Details) -> String {
-    if info.extensions.is_empty() {
-        return "Extensions: None\n\n".into();
+fn extensions_text(heading: &str, extensions: &[Extension]) -> String {
+    let items: Vec<_> = extensions
+        .iter()
+        .map(|extension| (extension.title(), extension.lines.clone()))
+        .collect();
+    section_text(heading, &items)
+}
+
+/// An indented section of titled items, or `<heading>: None` when empty.
+fn section_text(heading: &str, items: &[(String, Vec<String>)]) -> String {
+    if items.is_empty() {
+        return format!("{heading}: None\n\n");
     }
-    let mut text = String::from("Extensions:\n");
-    for extension in &info.extensions {
-        text.push_str(&format!("  {}\n", extension.title()));
-        for line in &extension.lines {
+    let mut text = format!("{heading}:\n");
+    for (title, lines) in items {
+        text.push_str(&format!("  {title}\n"));
+        for line in lines {
             text.push_str(&format!("    {line}\n"));
         }
     }
     text.push('\n');
     text
+}
+
+/// A signature check's details line, naming the key it used.
+fn signature_line(result: Signature, key: &str) -> Line<'static> {
+    match result {
+        Signature::Verified => Line::from(format!("Signature: verified with {key}.")).green(),
+        Signature::Failed(reason) => {
+            Line::from(format!("Signature: does not verify with {key}: {reason}.")).red()
+        }
+        Signature::Unchecked(reason) => Line::from(format!("Signature: not checked ({reason}).")),
+    }
+}
+
+/// A hierarchy row: the label, then a `[weak]` tag and the signature tag.
+fn hierarchy_row(label: String, weak: bool, signature: Option<Signature>) -> Row<'static> {
+    let mut spans = vec![Span::raw(label)];
+    if weak {
+        spans.extend([Span::raw(" "), Span::raw("[weak]").yellow()]);
+    }
+    spans.push(Span::raw(" "));
+    spans.push(match signature {
+        Some(Signature::Verified) => Span::raw("[verified]").green(),
+        Some(Signature::Failed(_)) => Span::raw("[bad signature]").red(),
+        Some(Signature::Unchecked(_)) | None => Span::raw("[unchecked]"),
+    });
+    Row::new([Line::from(spans)])
+}
+
+/// The detail text of a certificate request entry, after the alias and type.
+fn request_text(
+    mut text: String,
+    der: &[u8],
+    request: Option<&Request>,
+    signature: Signature,
+    sha1: bool,
+) -> Text<'static> {
+    let mut lines = Vec::new();
+    if let Some(request) = request {
+        let summary = certificate_request::summarize(der);
+        let public_key = summary.as_ref().map_or_else(
+            || "Unavailable".into(),
+            |summary| format!("{} {}", summary.algorithm, summary.key_size_text()),
+        );
+        text.push_str(&format!(
+            "Version: {}\n\nSubject: {}\n\nPublic Key: {public_key}\n\nSignature Algorithm: {}\n",
+            request.version, request.subject, request.signature_algorithm,
+        ));
+        lines.extend(Text::from(text).lines);
+        for weakness in summary.iter().flat_map(|summary| &summary.weaknesses) {
+            lines.push(Line::from(format!("Weak: {weakness}.")).yellow());
+        }
+        lines.push(signature_line(signature, "its own public key"));
+        text = "\n".into();
+    } else {
+        text.push_str("Certificate request could not be decoded.\n\n");
+    }
+    text.push_str(&format!(
+        "Fingerprint ({}): {}\n\n",
+        if sha1 { "SHA-1" } else { "SHA-256" },
+        fingerprint(der, sha1)
+    ));
+    if let Some(request) = request {
+        text.push_str(&extensions_text(
+            "Requested extensions",
+            &request.extensions,
+        ));
+        if !request.attributes.is_empty() {
+            text.push_str(&section_text("Attributes", &request.attributes));
+        }
+    }
+    text.push_str(
+        "A request is not a certificate: it has no issuer or validity, and nothing in it is trusted.",
+    );
+    lines.extend(Text::from(text).lines);
+    Text::from(lines)
 }
 
 pub struct EntryDetails {
@@ -47,6 +134,9 @@ pub struct EntryDetails {
     /// or with its own key when it is the last and self-issued. `None` when
     /// the issuer is not stored.
     signatures: Vec<Option<Signature>>,
+    /// For a certificate request entry: the decoded request, if readable, and
+    /// its signature checked with its own key.
+    request: Option<(Option<Request>, Signature)>,
     details_focused: bool,
     sha1: bool,
     scroll: u16,
@@ -84,12 +174,23 @@ impl EntryDetails {
                 ))
             })
             .collect();
+        let request = data
+            .request
+            .as_deref()
+            .map(|der| (Request::parse(der).ok(), signature::verify_request(der)));
+        let rows = if request.is_some() {
+            1
+        } else {
+            certificates.len()
+        };
         Self {
             entry,
-            hierarchy: TableState::default().with_selected(certificates.len().checked_sub(1)),
+            hierarchy: TableState::default().with_selected(rows.checked_sub(1)),
             metadata,
             signatures,
-            details_focused: false,
+            // A request has no hierarchy to navigate, so its details take the keys.
+            details_focused: request.is_some(),
+            request,
             sha1: false,
             scroll: 0,
             page: 1,
@@ -116,14 +217,15 @@ impl EntryDetails {
                 }
                 Outcome::Save(path) => {
                     let scope = prompt.scope;
-                    let certificates = match scope {
+                    let items = match scope {
                         Scope::Certificate => self
                             .selected_certificate()
                             .map(|index| vec![entry.certificates[index].clone()])
                             .unwrap_or_default(),
                         Scope::Chain => entry.certificates.clone(),
+                        Scope::Request => entry.request.iter().cloned().collect(),
                     };
-                    match export::save(&path, &certificates) {
+                    match export::save(&path, &items, scope.pem_label()) {
                         Ok(()) => {
                             self.export = None;
                             self.message = Some((
@@ -141,6 +243,13 @@ impl EntryDetails {
         self.message = None;
         match key.code {
             KeyCode::Esc => return true,
+            KeyCode::Char('x') if entry.request.is_some() => {
+                self.export = Some(ExportPrompt::new(
+                    Scope::Request,
+                    &self.directory,
+                    &entry.alias,
+                ));
+            }
             KeyCode::Char('x') | KeyCode::Char('X') if self.selected_certificate().is_some() => {
                 let scope = if key.code == KeyCode::Char('X') {
                     Scope::Chain
@@ -156,9 +265,21 @@ impl EntryDetails {
 
     /// The `metadata` and stored-certificate index selected in the hierarchy.
     fn selected_certificate(&self) -> Option<usize> {
+        if self.request.is_some() {
+            return None;
+        }
         self.hierarchy
             .selected()
             .map(|i| self.metadata.len() - 1 - i)
+    }
+
+    /// The number of rows in the hierarchy pane.
+    fn rows(&self) -> usize {
+        if self.request.is_some() {
+            1
+        } else {
+            self.metadata.len()
+        }
     }
 
     pub fn handle_key(&mut self, key: KeyCode) {
@@ -175,7 +296,7 @@ impl EntryDetails {
                 if self.details_focused {
                     self.scroll = self.scroll.saturating_add(1).min(self.max_scroll);
                 } else if let Some(index) = self.hierarchy.selected() {
-                    self.select((index + 1).min(self.metadata.len().saturating_sub(1)));
+                    self.select((index + 1).min(self.rows().saturating_sub(1)));
                 }
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -200,6 +321,9 @@ impl EntryDetails {
         let mut text = format!("Alias: {}\nType: {}\n\n", entry.alias, entry.kind);
         if let Some(warning) = entry.chain_warning {
             text.push_str(&format!("{warning}\n\n"));
+        }
+        if let (Some(der), Some((request, signature))) = (&entry.request, &self.request) {
+            return request_text(text, der, request.as_ref(), *signature, self.sha1);
         }
         let Some(index) = self.selected_certificate() else {
             text.push_str("No certificate is stored with this entry.");
@@ -248,7 +372,7 @@ impl EntryDetails {
             fingerprint(&entry.certificates[index], self.sha1)
         ));
         if let Some(info) = &self.metadata[index] {
-            text.push_str(&extensions_text(info));
+            text.push_str(&extensions_text("Extensions", &info.extensions));
         }
         text.push_str(
             "Stored certificates only; signatures are checked within the chain, trust is not verified.",
@@ -281,20 +405,16 @@ impl EntryDetails {
                 .unwrap_or_else(|| format!("certificate {}", index + 2));
             format!("the public key of {issuer}")
         };
-        match result {
-            Signature::Verified => Line::from(format!("Signature: verified with {key}.")).green(),
-            Signature::Failed(reason) => {
-                Line::from(format!("Signature: does not verify with {key}: {reason}.")).red()
-            }
-            Signature::Unchecked(reason) => {
-                Line::from(format!("Signature: not checked ({reason})."))
-            }
-        }
+        signature_line(result, &key)
     }
 
     pub fn draw(&mut self, frame: &mut Frame, entry: &KeystoreEntry) {
         let area = frame.area();
-        let shortcuts = "Tab Focus | ↑/↓ j/k Navigate | PgUp/PgDn Home/End Scroll\nf SHA-256/SHA-1 | x Export certificate | X Export chain | Esc Back | q / Ctrl+C Quit";
+        let shortcuts = if self.request.is_some() {
+            "Tab Focus | ↑/↓ j/k Scroll | PgUp/PgDn Home/End Scroll\nf SHA-256/SHA-1 | x Export request | Esc Back | q / Ctrl+C Quit"
+        } else {
+            "Tab Focus | ↑/↓ j/k Navigate | PgUp/PgDn Home/End Scroll\nf SHA-256/SHA-1 | x Export certificate | X Export chain | Esc Back | q / Ctrl+C Quit"
+        };
         let minimum = Paragraph::new(shortcuts)
             .wrap(Wrap { trim: false })
             .line_count(area.width);
@@ -324,7 +444,7 @@ impl EntryDetails {
         );
         let tree_height = (content.height / 3)
             .min(
-                u16::try_from(self.metadata.len())
+                u16::try_from(self.rows())
                     .unwrap_or(u16::MAX)
                     .saturating_add(2),
             )
@@ -332,14 +452,41 @@ impl EntryDetails {
         let [hierarchy, details] =
             Layout::vertical([Constraint::Length(tree_height), Constraint::Min(3)]).areas(content);
         let focused = |focus| if focus { Color::Blue } else { Color::Reset };
+        let (tree_title, details_title) = if self.request.is_some() {
+            ("Certificate request", "Request details")
+        } else {
+            ("Certificate hierarchy", "Certificate details")
+        };
         let tree_block = Block::bordered()
             .title(if self.details_focused {
-                " Certificate hierarchy "
+                format!(" {tree_title} ")
             } else {
-                " Certificate hierarchy [focused] "
+                format!(" {tree_title} [focused] ")
             })
             .border_style(Style::default().fg(focused(!self.details_focused)));
-        if self.metadata.is_empty() {
+        let highlight = Style::default()
+            .fg(Color::Rgb(0, 0, 0))
+            .bg(Color::Rgb(175, 255, 255))
+            .bold();
+        if let Some((request, signature)) = &self.request {
+            let label = request
+                .as_ref()
+                .map(|request| request.subject.to_string())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "Certificate request (unreadable or unnamed)".into());
+            let weak = entry
+                .certificate
+                .as_ref()
+                .is_some_and(|summary| !summary.weaknesses.is_empty());
+            let table = Table::new(
+                [hierarchy_row(label, weak, Some(*signature))],
+                [Constraint::Min(0)],
+            )
+            .block(tree_block)
+            .highlight_symbol("> ")
+            .row_highlight_style(highlight);
+            frame.render_stateful_widget(table, hierarchy, &mut self.hierarchy);
+        } else if self.metadata.is_empty() {
             frame.render_widget(
                 Paragraph::new("No certificate").block(tree_block),
                 hierarchy,
@@ -362,34 +509,19 @@ impl EntryDetails {
                         let weak = certificate::summarize(&entry.certificates[index])
                             .is_some_and(|summary| !summary.weaknesses.is_empty());
                         let indent = "  ".repeat(depth.min(8));
-                        let mut spans = vec![Span::raw(format!("{indent}{label}"))];
-                        if weak {
-                            spans.extend([Span::raw(" "), Span::raw("[weak]").yellow()]);
-                        }
-                        spans.push(Span::raw(" "));
-                        spans.push(match self.signatures[index] {
-                            Some(Signature::Verified) => Span::raw("[verified]").green(),
-                            Some(Signature::Failed(_)) => Span::raw("[bad signature]").red(),
-                            Some(Signature::Unchecked(_)) | None => Span::raw("[unchecked]"),
-                        });
-                        Row::new([Line::from(spans)])
+                        hierarchy_row(format!("{indent}{label}"), weak, self.signatures[index])
                     });
             let table = Table::new(rows, [Constraint::Min(0)])
                 .block(tree_block)
                 .highlight_symbol("> ")
-                .row_highlight_style(
-                    Style::default()
-                        .fg(Color::Rgb(0, 0, 0))
-                        .bg(Color::Rgb(175, 255, 255))
-                        .bold(),
-                );
+                .row_highlight_style(highlight);
             frame.render_stateful_widget(table, hierarchy, &mut self.hierarchy);
         }
         let block = Block::bordered()
             .title(if self.details_focused {
-                " Certificate details [focused] "
+                format!(" {details_title} [focused] ")
             } else {
-                " Certificate details "
+                format!(" {details_title} ")
             })
             .border_style(Style::default().fg(focused(self.details_focused)));
         let inner = block.inner(details);
@@ -437,6 +569,7 @@ mod tests {
     use crate::test_support::metadata_certificate;
     use crown::asn1::{der, oid::ObjectIdentifier};
     use ratatui::{Terminal, backend::TestBackend};
+    use std::path::Path;
 
     fn entry(certificates: Vec<Vec<u8>>) -> KeystoreEntry {
         KeystoreEntry {
@@ -445,6 +578,7 @@ mod tests {
             certificate: None,
             certificates,
             chain_warning: None,
+            request: None,
         }
     }
 
@@ -611,7 +745,7 @@ mod tests {
         view.handle_key(KeyCode::Up);
         assert_eq!(
             line(&view),
-            "Signature: does not verify with the public key of CN=root: the issuer's public key did not make it."
+            "Signature: does not verify with the public key of CN=root: the signature does not match."
         );
         view.handle_key(KeyCode::Up);
         assert_eq!(
@@ -633,6 +767,88 @@ mod tests {
             view.signatures[0],
             Some(Signature::Unchecked("the certificate could not be decoded"))
         );
+    }
+
+    #[test]
+    fn request_entries_show_the_request_and_export_it() {
+        use crate::test_support::{KEYTOOL_REQUEST, TestDirectory, ed25519_request};
+        use ratatui::crossterm::event::KeyModifiers;
+        let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let file = crate::certificate_file::parse(KEYTOOL_REQUEST).unwrap();
+        let data = &file.entries[0];
+        let directory = TestDirectory::new();
+        let mut view = EntryDetails::new(0, data, directory.path().to_path_buf());
+        assert!(view.details_focused);
+        let screen = draw(&mut view, data, 120, 60);
+        assert!(screen.contains(" Certificate request "));
+        assert!(screen.contains(" Request details [focused] "));
+        assert!(screen.contains("O=keystore-tui,CN=CSR TUI test fixture [verified]"));
+        assert!(screen.contains("x Export request"));
+        let text = view.text(data, 0).to_string();
+        for expected in [
+            "Type: Certificate request\n\nVersion: 1\n\nSubject: O=keystore-tui,CN=CSR TUI test fixture\n\nPublic Key: EC 256 bits\n\nSignature Algorithm: SHA-384 with ECDSA\nSignature: verified with its own public key.\n",
+            "Fingerprint (SHA-256): ",
+            "Requested extensions:\n  Subject Key Identifier (2.5.29.14)\n",
+            "    DNS: csr.example.test\n",
+            "nothing in it is trusted",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text}");
+        }
+        assert!(!text.contains("Attributes:"));
+        view.handle_key(KeyCode::Char('f'));
+        assert!(
+            view.text(data, 0)
+                .to_string()
+                .contains("Fingerprint (SHA-1)")
+        );
+
+        assert!(!view.handle_event(press(KeyCode::Char('X')), data));
+        assert!(!view.exporting());
+        view.handle_event(press(KeyCode::Char('x')), data);
+        let prompt = view.export.as_ref().unwrap();
+        assert_eq!(prompt.scope, Scope::Request);
+        let path = directory.path().join("CSR_TUI_test_fixture.csr");
+        assert_eq!(Path::new(&prompt.path), path);
+        view.handle_event(press(KeyCode::Enter), data);
+        assert!(!view.exporting());
+        let saved = std::fs::read_to_string(&path).unwrap();
+        let blocks = crown::asn1::pem::parse(&saved).unwrap();
+        assert_eq!(blocks[0].label, "CERTIFICATE REQUEST");
+        assert_eq!(Some(&blocks[0].data), data.request.as_ref());
+
+        let attributes = der::sequence(
+            &[
+                der::oid(&ObjectIdentifier::new(&[1, 2, 840, 113549, 1, 9, 7]).unwrap()),
+                der::set(&der::utf8_string("synthetic")),
+            ]
+            .concat(),
+        );
+        let mut altered = ed25519_request("device", &[attributes]);
+        let at = altered.windows(6).position(|w| w == b"device").unwrap();
+        altered[at] = b'D';
+        let altered_entry = KeystoreEntry {
+            kind: certificate_request::KIND,
+            request: Some(altered),
+            ..entry(vec![])
+        };
+        let mut view = EntryDetails::new(0, &altered_entry, PathBuf::new());
+        assert!(draw(&mut view, &altered_entry, 100, 50).contains("CN=Device [bad signature]"));
+        let text = view.text(&altered_entry, 0).to_string();
+        assert!(text.contains(
+            "Signature: does not verify with its own public key: the signature does not match."
+        ));
+        assert!(text.contains(
+            "Attributes:\n  Challenge Password (1.2.840.113549.1.9.7)\n    Present; not shown.\n"
+        ));
+        assert!(!text.contains("synthetic"));
+        let junk = KeystoreEntry {
+            request: Some(b"junk".to_vec()),
+            ..altered_entry
+        };
+        let mut view = EntryDetails::new(0, &junk, PathBuf::new());
+        let screen = draw(&mut view, &junk, 100, 30);
+        assert!(screen.contains("Certificate request (unreadable or unnamed) [unchecked]"));
+        assert!(screen.contains("Certificate request could not be decoded."));
     }
 
     #[test]

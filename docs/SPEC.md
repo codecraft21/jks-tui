@@ -18,6 +18,7 @@ document, and also the README if users will notice.
   - [Filtering](#filtering)
   - [Sorting](#sorting)
 - [Entry details](#entry-details)
+  - [Certificate requests](#certificate-requests)
   - [Weak cryptography](#weak-cryptography)
   - [Extensions](#extensions)
   - [Certificate hierarchy](#certificate-hierarchy)
@@ -28,9 +29,10 @@ document, and also the README if users will notice.
 
 ## Scope
 
-- The app reads Java KeyStore (JKS), JCEKS, and PKCS12 files, and standalone
-  certificate files. It never writes or modifies them.
-- The only files it writes are new certificate exports; see
+- The app reads Java KeyStore (JKS), JCEKS, and PKCS12 files, standalone
+  certificate files, and PKCS#10 certificate requests. It never writes or
+  modifies them.
+- The only files it writes are new certificate and request exports; see
   [Exporting](#exporting).
 - It runs without Java or `keytool` installed.
 - Private keys are never decrypted, displayed, or exported.
@@ -42,7 +44,7 @@ document, and also the README if users will notice.
 - The browser starts in the working directory. If a keystore is open, it starts
   in that keystore's directory.
 - It lists directories, then files whose extension is `.jks`, `.jceks`, `.p12`,
-  `.pfx`, `.pem`, `.crt`, `.cer`, `.der`, `.p7b`, or `.p7c`
+  `.pfx`, `.pem`, `.crt`, `.cer`, `.der`, `.p7b`, `.p7c`, `.csr`, or `.p10`
   (case-insensitive). Directories come first.
 - A `../` entry leads to the parent directory. Selection wraps at both ends, and
   `../` takes part in the wrap.
@@ -118,14 +120,19 @@ document, and also the README if users will notice.
   - PEM `PKCS7` or `CMS` blocks, and DER PKCS#7 SignedData; their X.509
     certificates are listed and anything else in them is ignored
   - a single DER certificate, which must be one complete DER element
+  - PEM blocks labelled `CERTIFICATE REQUEST` or `NEW CERTIFICATE REQUEST`
+    (as `keytool -certreq` writes), and a single DER PKCS#10 request, which
+    must be one complete DER element
 - Text outside PEM blocks is ignored. Other PEM blocks, such as private keys,
   are not decoded; a persistent yellow warning says some were skipped.
-- A malformed PEM block, invalid Base64, or a file without any certificate is
-  an error. A certificate inside a PEM block that cannot be decoded is still
+- A malformed PEM block, invalid Base64, or a file without any certificate or
+  request is an error. A certificate inside a PEM block that cannot be decoded is still
   listed, as for keystores.
-- Each certificate is one entry of type `Certificate`, listed in file order
-  (the alias sort keeps that order). The alias is the subject common name, else
-  the whole subject, else `Certificate N` for its position in the file.
+- Each certificate is one entry of type `Certificate`, and each request one
+  entry of type `Certificate request`, listed in file order (the alias sort
+  keeps that order). The alias is the subject common name, else the whole
+  subject, else `Certificate N` or `Certificate request N` for its position in
+  the file. Requests are never part of a certificate's chain.
 
 ## Password prompt
 
@@ -148,6 +155,9 @@ document, and also the README if users will notice.
   in its chain. In PKCS12, that is the certificate that shares the key's local
   key ID.
 - Secret keys and unreadable certificates show `-` in the certificate columns.
+- A certificate request shows its public key's algorithm and size, and `-`
+  under Expires. Its Crypto column checks only the key size; see
+  [Certificate requests](#certificate-requests).
 - An unrecognized algorithm is shown as its OID.
 - Key size means the modulus size for RSA and DSA, and the curve size for EC.
 - Expiry dates are in UTC. They are yellow when the certificate expires within
@@ -184,8 +194,8 @@ document, and also the README if users will notice.
 ### Sorting
 
 - `s` switches between alias order and expiry order.
-- Expiry order puts the soonest expiry first and entries without an expiry date
-  last. The sort is stable, so entries with equal dates keep their alias order.
+- Expiry order puts the soonest expiry first and entries without an expiry date,
+  including certificate requests, last. The sort is stable, so entries with equal dates keep their alias order.
 - The sort order is kept when another keystore is opened.
 - Filtering and sorting keep the same entry selected while it is still listed;
   otherwise the first listed entry is selected. The detail view always opens
@@ -216,6 +226,44 @@ document, and also the README if users will notice.
 - An entry without certificates still opens, with an explanation.
 - If one certificate in a chain cannot be read, the other chain members are
   still shown.
+
+### Certificate requests
+
+- A certificate request entry opens in the same full-screen view. The top pane,
+  titled "Certificate request", has one row: the request's subject (or
+  `Certificate request (unreadable or unnamed)`), followed by `[weak]` when its
+  key is short and the signature tag. The bottom pane, titled "Request
+  details", has focus when the view opens, so `Up` / `Down` scroll it.
+- The details show, in order:
+  - alias and type
+  - version (the stored value plus one, as for certificates)
+  - subject
+  - public key algorithm and size
+  - signature algorithm, followed by a yellow `Weak: ...` line for a short key,
+    then the signature check
+  - fingerprint, SHA-256 or SHA-1 as for certificates, over the request's bytes
+  - "Requested extensions:", from the PKCS#9 extension request attribute (or
+    Microsoft's `1.3.6.1.4.1.311.2.1.14`), decoded as in
+    [Extensions](#extensions); `Requested extensions: None` when there are none
+  - "Attributes:", only when the request has other attributes. A challenge
+    password is shown as `Present; not shown.` and its value is never
+    displayed. An unstructured name is shown as text, with control characters
+    escaped. Other attributes show their OID and each value in hex. An
+    extension request whose value cannot be decoded is listed here with
+    `Could not decode; value:` and its hex, and a malformed attribute as
+    "Malformed attribute" with its encoding in hex.
+  - a closing note that a request has no issuer or validity and is not trusted.
+- A request whose fields cannot be decoded shows "Certificate request could not
+  be decoded." and its fingerprint.
+- The signature is checked with the request's own public key, as for a
+  self-signed certificate. The details line reads `verified with its own public
+  key.`, `does not verify with its own public key: <reason>.`, or `not checked
+  (<reason>).`, with the colours and supported algorithms of
+  [Signature checks](#signature-checks).
+- Only the key size is checked for weakness. The signature hash is not flagged,
+  because the issued certificate is signed by the CA, not with the request's
+  hash.
+- `x` exports the request; `X` does nothing. See [Exporting](#exporting).
 
 ### Weak cryptography
 
@@ -305,9 +353,11 @@ document, and also the README if users will notice.
 
 - `x` exports the certificate selected in the hierarchy; `X` exports every
   certificate stored with the entry, leaf first. Neither does anything for an
-  entry without certificates.
-- A prompt replaces the detail shortcuts. It suggests `<alias>.pem` or
-  `<alias>-chain.pem` in the open file's directory. Characters other than
+  entry without certificates. For a certificate request entry, `x` exports the
+  request and `X` does nothing.
+- A prompt replaces the detail shortcuts. It suggests `<alias>.pem`,
+  `<alias>-chain.pem`, or `<alias>.csr` for a request, in the open file's
+  directory. Characters other than
   letters, digits, `-`, `_`, and `.` in the alias become `_`, and a name that
   already exists gets a number, such as `server-2.pem`.
 - While the prompt is open, every character without `Ctrl` or `Alt` is typed
@@ -315,9 +365,10 @@ document, and also the README if users will notice.
   `Ctrl+U` clears the name, `Enter` saves, and `Esc` cancels without leaving the
   detail view. `Ctrl+C` still quits.
 - A relative name is resolved against the open file's directory.
-- A `.der` name (case-insensitive) saves one certificate as raw DER; a chain
-  cannot be saved as DER. Any other name saves PEM `CERTIFICATE` blocks with
-  64-character lines. The certificates are written byte for byte as stored.
+- A `.der` name (case-insensitive) saves one certificate or the request as raw
+  DER; a chain cannot be saved as DER. Any other name saves PEM `CERTIFICATE`
+  blocks, or a `CERTIFICATE REQUEST` block for a request, with 64-character
+  lines. The DER is written byte for byte as stored.
 - The file must not exist yet; it is never replaced. On success a green message
   names the saved file and the prompt closes. On failure a red message explains
   why and the prompt stays open to correct the name. The message clears on the

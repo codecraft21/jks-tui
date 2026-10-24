@@ -184,7 +184,7 @@ pub(super) fn serial_text(bytes: &[u8], hex: bool) -> String {
     )
 }
 
-fn signature_name(id: &ObjectIdentifier) -> String {
+pub(crate) fn signature_name(id: &ObjectIdentifier) -> String {
     let names: &[(&[u64], &str)] = &[
         (&[1, 2, 840, 113549, 1, 1, 2], "MD2 with RSA"),
         (&[1, 2, 840, 113549, 1, 1, 4], "MD5 with RSA"),

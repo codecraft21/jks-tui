@@ -1,7 +1,8 @@
 # Agent and contributor guide
 
 keystore-tui is a small, read-only Rust and Ratatui TUI for inspecting JKS,
-JCEKS, and PKCS12 keystores and standalone certificate files. [`README.md`](README.md) describes the app from the user's
+JCEKS, and PKCS12 keystores, standalone certificate files, and certificate
+signing requests. [`README.md`](README.md) describes the app from the user's
 point of view. [`docs/SPEC.md`](docs/SPEC.md) specifies its detailed behaviour.
 This file covers how the code is organised and how to work on it.
 
@@ -19,7 +20,8 @@ This file covers how the code is organised and how to work on it.
 | Module | Responsibility |
 | --- | --- |
 | `src/main.rs` | App state, event loop, main view rendering, password prompt, file loading (size limit, format detection), terminal setup and restoration |
-| `src/certificate_file.rs` | PEM, DER, and PKCS#7 certificate files, and chain linking within a file |
+| `src/certificate_file.rs` | PEM, DER, and PKCS#7 certificate files (including requests), and chain linking within a file |
+| `src/certificate_request.rs` | PKCS#10 certificate requests: fields, requested extensions, and attributes |
 | `src/file_picker.rs` | The keystore file browser |
 | `src/keystore.rs` | JKS and JCEKS parsing and integrity check (SHA-1); the shared `KeystoreEntry` model |
 | `src/java_serialization.rs` | Skipping a serialized Java object (a JCEKS secret key) without deserializing it |
@@ -29,9 +31,9 @@ This file covers how the code is organised and how to work on it.
 | `src/certificate/details.rs` | Full certificate fields for the detail view |
 | `src/certificate/extensions.rs` | Decoding X.509 extensions into display lines |
 | `src/certificate/security.rs` | Weak key-size and signature-hash checks |
-| `src/certificate/signature.rs` | Checking a certificate's signature with its issuer's public key |
+| `src/certificate/signature.rs` | Checking a certificate's signature with its issuer's public key, and a request's with its own |
 | `src/entry_details.rs` | The full-screen detail view and the certificate hierarchy |
-| `src/export.rs` | The export name prompt and writing PEM/DER files |
+| `src/export.rs` | The export name prompt and writing PEM/DER certificate and request files |
 | `src/test_support.rs`, `src/tests.rs` | Unit-test helpers, synthetic keystores, and tests |
 | `tests/terminal_smoke.py` | PTY smoke tests against the built binary |
 | `tests/fixtures/` | Generated keystore fixtures; see its `README.md` for how they were made |
@@ -41,7 +43,7 @@ Dependencies are deliberately few:
 - `ratatui`, with the `crossterm` backend, for the UI.
 - `sha1` for the JKS and JCEKS integrity digest.
 - `crown` for ASN.1, PEM, X.509, PKCS#7, PKCS12 (MAC and PBE), and signature
-  verification.
+  verification (certificates and requests).
 - `zeroize` for wiping passwords.
 
 ## Development
@@ -75,7 +77,9 @@ signature checks, fingerprints, extensions, resizing, and returning to the list.
 three-entry store at runtime from copies of that certificate to exercise
 filtering (including `q` typed into the filter and `Esc` cancelling it) and
 sorting. They also open a PEM certificate file and export it, checking that `q`
-is typed into the export name and `Esc` cancels the prompt. They check that `q`,
+is typed into the export name and `Esc` cancels the prompt. They open the
+`keytool` certificate request fixture, check its signature is verified, and
+export it as PEM. They check that `q`,
 `Esc`, and `Ctrl+C` (including while typing a filter) restore terminal modes, leave the alternate screen, and show the cursor
 again.
 

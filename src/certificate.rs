@@ -8,7 +8,8 @@ use crown::{
     x509::name::Name,
 };
 
-/// The subject, public key and expiry of an X.509 certificate, for display only.
+/// The subject, public key and expiry of an X.509 certificate or certificate
+/// request, for display only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Summary {
     /// The subject distinguished name, or empty when it cannot be decoded.
@@ -16,7 +17,8 @@ pub struct Summary {
     pub algorithm: String,
     /// `None` when the size is unknown or not meaningful for the algorithm.
     pub key_size: Option<u32>,
-    pub not_after: Asn1Time,
+    /// `None` for a certificate request, which has no validity period.
+    pub not_after: Option<Asn1Time>,
     /// Weak key or signature choices, in that order; empty when none are found.
     pub weaknesses: Vec<security::Weakness>,
 }
@@ -28,12 +30,14 @@ impl Summary {
     }
 
     pub fn expiry_text(&self) -> String {
-        let time = self.not_after;
-        format!("{:04}-{:02}-{:02}", time.year, time.month, time.day)
+        self.not_after.map_or_else(
+            || "-".into(),
+            |time| format!("{:04}-{:02}-{:02}", time.year, time.month, time.day),
+        )
     }
 
     pub fn is_expired(&self, now: i64) -> bool {
-        self.not_after.to_unix() < now
+        self.not_after.is_some_and(|time| time.to_unix() < now)
     }
 }
 
@@ -59,7 +63,29 @@ pub fn summarize(der: &[u8]) -> Option<Summary> {
     validity.read_time().ok()?;
     let not_after = validity.read_time().ok()?;
     let subject = tbs.read_raw_tlv().ok()?;
-    let mut spki = tbs.read_sequence().ok()?;
+    let (name, key_size) = public_key(tbs.read_raw_tlv().ok()?)?;
+    let weaknesses = security::weaknesses(&name, key_size, &signature, issuer == subject);
+    Some(Summary {
+        // Unusual names must not hide the entry, so decode failures leave it empty.
+        subject: subject_text(subject),
+        algorithm: name,
+        key_size,
+        not_after: Some(not_after),
+        weaknesses,
+    })
+}
+
+/// The decoded distinguished name, or empty when it cannot be decoded.
+pub fn subject_text(name: &[u8]) -> String {
+    Name::parse(&mut Reader::new(name))
+        .map(|name| name.to_string())
+        .unwrap_or_default()
+}
+
+/// The algorithm name and key size of a SubjectPublicKeyInfo. Unrecognized
+/// algorithms are named by their OID.
+pub fn public_key(spki: &[u8]) -> Option<(String, Option<u32>)> {
+    let mut spki = Reader::new(spki).read_sequence().ok()?;
     let mut algorithm = spki.read_sequence().ok()?;
     let id = algorithm.read_oid().ok()?;
     let key = spki.read_bit_string_bytes().ok()?;
@@ -112,17 +138,7 @@ pub fn summarize(der: &[u8]) -> Option<Summary> {
             |(_, name, size)| (name.into(), size),
         )
     };
-    let weaknesses = security::weaknesses(&name, key_size, &signature, issuer == subject);
-    Some(Summary {
-        // Unusual names must not hide the entry, so decode failures leave it empty.
-        subject: Name::parse(&mut Reader::new(subject))
-            .map(|name| name.to_string())
-            .unwrap_or_default(),
-        algorithm: name,
-        key_size,
-        not_after,
-        weaknesses,
-    })
+    Some((name, key_size))
 }
 
 fn bit_length(magnitude: &[u8]) -> Option<u32> {

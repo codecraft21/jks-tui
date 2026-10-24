@@ -1,6 +1,7 @@
 //! Checks a certificate's signature against the public key of the certificate
-//! stored as its issuer. This is offline and makes no trust decisions: names,
-//! validity, constraints, and revocation are not checked.
+//! stored as its issuer, and a certificate request's against its own key. This
+//! is offline and makes no trust decisions: names, validity, constraints, and
+//! revocation are not checked.
 use crown::{
     asn1::{Reader, der::Class},
     error::CryptoError,
@@ -17,10 +18,11 @@ pub enum Signature {
 }
 
 /// The signed bytes, the signature algorithm (from inside and outside the
-/// signed part), and the signature value.
+/// signed part), and the signature value. A request's signed part does not
+/// repeat the algorithm.
 struct Signed<'a> {
     tbs: &'a [u8],
-    inner_algorithm: &'a [u8],
+    inner_algorithm: Option<&'a [u8]>,
     outer_algorithm: &'a [u8],
     value: &'a [u8],
 }
@@ -34,7 +36,7 @@ fn signed(der: &[u8]) -> Option<Signed<'_>> {
     let mut fields = Reader::new(tbs).read_sequence().ok()?;
     skip_version(&mut fields)?;
     fields.read_raw_tlv().ok()?; // Serial number.
-    let inner_algorithm = fields.read_raw_tlv().ok()?;
+    let inner_algorithm = Some(fields.read_raw_tlv().ok()?);
     Some(Signed {
         tbs,
         inner_algorithm,
@@ -93,32 +95,76 @@ pub fn verify(certificate: &[u8], issuer: &[u8]) -> Signature {
     let Some(signed) = signed(certificate) else {
         return Signature::Unchecked("the certificate could not be decoded");
     };
-    let Ok(identifier) = AlgorithmIdentifier::parse(&mut Reader::new(signed.outer_algorithm))
-    else {
-        return Signature::Unchecked("the signature algorithm could not be decoded");
-    };
-    let Ok(algorithm) = SignatureAlgorithm::from_identifier(&identifier) else {
-        return Signature::Unchecked("the signature algorithm is not supported");
-    };
     let Some(spki) = subject_public_key_info(issuer) else {
-        return Signature::Unchecked("the issuer certificate could not be decoded");
+        return match parse_algorithm(signed.outer_algorithm) {
+            Err(reason) => Signature::Unchecked(reason),
+            Ok(_) => Signature::Unchecked("the issuer certificate could not be decoded"),
+        };
+    };
+    check(&signed, spki)
+}
+
+/// Checks a PKCS#10 certificate request's signature with its own public key.
+/// A match shows the request is intact and was signed with the private key
+/// matching the public key it contains.
+pub fn verify_request(request: &[u8]) -> Signature {
+    let Some((signed, spki)) = signed_request(request) else {
+        return Signature::Unchecked("the request could not be decoded");
+    };
+    check(&signed, spki)
+}
+
+/// A request's signed parts and its SubjectPublicKeyInfo.
+fn signed_request(request: &[u8]) -> Option<(Signed<'_>, &[u8])> {
+    let mut fields = Reader::new(request).read_sequence().ok()?;
+    let tbs = fields.read_raw_tlv().ok()?;
+    let outer_algorithm = fields.read_raw_tlv().ok()?;
+    let value = fields.read_bit_string_bytes().ok()?;
+    let mut info = Reader::new(tbs).read_sequence().ok()?;
+    info.read_raw_tlv().ok()?; // Version.
+    info.read_raw_tlv().ok()?; // Subject.
+    let signed = Signed {
+        tbs,
+        inner_algorithm: None,
+        outer_algorithm,
+        value,
+    };
+    Some((signed, info.read_raw_tlv().ok()?))
+}
+
+fn parse_algorithm(identifier: &[u8]) -> Result<SignatureAlgorithm, &'static str> {
+    let identifier = AlgorithmIdentifier::parse(&mut Reader::new(identifier))
+        .map_err(|_| "the signature algorithm could not be decoded")?;
+    SignatureAlgorithm::from_identifier(&identifier)
+        .map_err(|_| "the signature algorithm is not supported")
+}
+
+/// Checks the signature with the key in `spki`. An algorithm repeated inside
+/// the signed part must match the one outside it.
+fn check(signed: &Signed<'_>, spki: &[u8]) -> Signature {
+    let algorithm = match parse_algorithm(signed.outer_algorithm) {
+        Ok(algorithm) => algorithm,
+        Err(reason) => return Signature::Unchecked(reason),
     };
     let key = match SubjectPublicKeyInfo::parse(spki) {
         Ok(spki) => spki.public_key,
         Err(CryptoError::UnsupportedOperation(_)) => {
-            return Signature::Unchecked("the issuer's key type is not supported");
+            return Signature::Unchecked("the key type is not supported");
         }
-        Err(_) => return Signature::Unchecked("the issuer's public key could not be decoded"),
+        Err(_) => return Signature::Unchecked("the public key could not be decoded"),
     };
-    if signed.inner_algorithm != signed.outer_algorithm {
+    if signed
+        .inner_algorithm
+        .is_some_and(|inner| inner != signed.outer_algorithm)
+    {
         return Signature::Failed("the signature algorithm differs inside the certificate");
     }
     if !compatible(&algorithm, &key) {
-        return Signature::Failed("the issuer's key type cannot make this signature");
+        return Signature::Failed("the key type cannot make this signature");
     }
     match algorithm.verify(&key, signed.tbs, signed.value) {
         Ok(true) => Signature::Verified,
-        Ok(false) | Err(_) => Signature::Failed("the issuer's public key did not make it"),
+        Ok(false) | Err(_) => Signature::Failed("the signature does not match"),
     }
 }
 
@@ -144,7 +190,7 @@ mod tests {
         let root = ed25519_certificate("root", "root", 1, 1);
         let other = ed25519_certificate("other", "other", 3, 3);
         let leaf = ed25519_certificate("leaf", "root", 2, 1);
-        let failed = Signature::Failed("the issuer's public key did not make it");
+        let failed = Signature::Failed("the signature does not match");
         assert_eq!(verify(&leaf, &other), failed);
         let mut altered = leaf.clone();
         let last = altered.len() - 1;
@@ -156,7 +202,7 @@ mod tests {
         assert_eq!(verify(&renamed, &root), failed);
         assert_eq!(
             verify(&leaf, fixture_certificate_der()),
-            Signature::Failed("the issuer's key type cannot make this signature")
+            Signature::Failed("the key type cannot make this signature")
         );
         // Placeholder signature bytes in a well-formed ECDSA certificate.
         let placeholder = metadata_certificate("leaf", "root", &[1], &[]);
@@ -215,7 +261,7 @@ mod tests {
             (
                 leaf.clone(),
                 replace_algorithm(&root, 1, &unknown),
-                "the issuer's key type is not supported",
+                "the key type is not supported",
             ),
         ] {
             assert_eq!(verify(&certificate, &issuer), Signature::Unchecked(reason));

@@ -53,6 +53,8 @@ pub struct KeystoreEntry {
     /// Original DER in leaf-first stored order, including unreadable certificates.
     pub certificates: Vec<Vec<u8>>,
     pub chain_warning: Option<&'static str>,
+    /// A PKCS#10 certificate request's DER. Such an entry stores no certificates.
+    pub request: Option<Vec<u8>>,
 }
 
 /// A structurally valid keystore whose integrity digest has not been checked.
@@ -145,6 +147,7 @@ pub fn parse(mut data: Vec<u8>) -> Result<Keystore, Error> {
             certificate,
             certificates,
             chain_warning: None,
+            request: None,
         });
     }
     let body_len = data.len() - reader.remaining.len();
@@ -304,6 +307,7 @@ mod tests {
             certificate: None,
             certificates: vec![b"opaque synthetic certificate".to_vec()],
             chain_warning: None,
+            request: None,
         }
     }
 
@@ -314,6 +318,7 @@ mod tests {
             certificate: None,
             certificates: vec![b"opaque synthetic certificate".to_vec()],
             chain_warning: None,
+            request: None,
         }
     }
 
@@ -621,6 +626,7 @@ mod tests {
             certificate: None,
             certificates: vec![],
             chain_warning: None,
+            request: None,
         }
     }
 

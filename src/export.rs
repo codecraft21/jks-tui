@@ -1,4 +1,5 @@
-//! Saving certificates to new PEM or DER files. Existing files are never replaced.
+//! Saving certificates and certificate requests to new PEM or DER files.
+//! Existing files are never replaced.
 use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
@@ -14,6 +15,8 @@ pub enum Scope {
     Certificate,
     /// Every stored certificate of the entry, leaf first.
     Chain,
+    /// A certificate request entry's request.
+    Request,
 }
 
 impl Scope {
@@ -21,6 +24,15 @@ impl Scope {
         match self {
             Self::Certificate => "certificate",
             Self::Chain => "chain",
+            Self::Request => "certificate request",
+        }
+    }
+
+    /// The PEM block label for what this scope saves.
+    pub fn pem_label(self) -> &'static str {
+        match self {
+            Self::Certificate | Self::Chain => "CERTIFICATE",
+            Self::Request => "CERTIFICATE REQUEST",
         }
     }
 }
@@ -39,8 +51,8 @@ pub struct ExportPrompt {
 }
 
 impl ExportPrompt {
-    /// Suggests `<alias>.pem` (or `<alias>-chain.pem`) in `directory`, numbered
-    /// to avoid names that already exist.
+    /// Suggests `<alias>.pem`, `<alias>-chain.pem`, or `<alias>.csr` in
+    /// `directory`, numbered to avoid names that already exist.
     pub fn new(scope: Scope, directory: &Path, alias: &str) -> Self {
         let mut stem: String = alias
             .chars()
@@ -53,18 +65,28 @@ impl ExportPrompt {
             })
             .collect();
         if stem.trim_matches('.').is_empty() {
-            stem = "certificate".into();
+            stem = if scope == Scope::Request {
+                "request"
+            } else {
+                "certificate"
+            }
+            .into();
         }
         if scope == Scope::Chain {
             stem.push_str("-chain");
         }
+        let extension = if scope == Scope::Request {
+            "csr"
+        } else {
+            "pem"
+        };
         let path = (1..100)
             .map(|n| match n {
-                1 => directory.join(format!("{stem}.pem")),
-                n => directory.join(format!("{stem}-{n}.pem")),
+                1 => directory.join(format!("{stem}.{extension}")),
+                n => directory.join(format!("{stem}-{n}.{extension}")),
             })
             .find(|path| !path.exists())
-            .unwrap_or_else(|| directory.join(format!("{stem}.pem")));
+            .unwrap_or_else(|| directory.join(format!("{stem}.{extension}")));
         Self {
             scope,
             path: path.to_string_lossy().into_owned(),
@@ -98,22 +120,23 @@ pub fn is_der(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("der"))
 }
 
-/// PEM concatenates certificates in the given order; DER holds exactly one.
-pub fn encode(certificates: &[Vec<u8>], der: bool) -> Result<Vec<u8>, &'static str> {
-    match (der, certificates) {
-        (true, [certificate]) => Ok(certificate.clone()),
+/// PEM concatenates blocks labelled `pem_label` in the given order; DER holds
+/// exactly one item.
+pub fn encode(items: &[Vec<u8>], der: bool, pem_label: &str) -> Result<Vec<u8>, &'static str> {
+    match (der, items) {
+        (true, [item]) => Ok(item.clone()),
         (true, _) => Err("A DER file holds one certificate; use a .pem name for the chain."),
-        (false, _) => Ok(certificates
+        (false, _) => Ok(items
             .iter()
-            .map(|certificate| pem::encode("CERTIFICATE", certificate))
+            .map(|item| pem::encode(pem_label, item))
             .collect::<String>()
             .into_bytes()),
     }
 }
 
 /// Writes a new file, failing if `path` already exists.
-pub fn save(path: &Path, certificates: &[Vec<u8>]) -> Result<(), String> {
-    let data = encode(certificates, is_der(path))?;
+pub fn save(path: &Path, items: &[Vec<u8>], pem_label: &str) -> Result<(), String> {
+    let data = encode(items, is_der(path), pem_label)?;
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -162,6 +185,8 @@ mod tests {
             Path::new(&prompt.path),
             directory.path().join("certificate.pem")
         );
+        let prompt = ExportPrompt::new(Scope::Request, directory.path(), "server");
+        assert_eq!(Path::new(&prompt.path), directory.path().join("server.csr"));
     }
 
     #[test]
@@ -196,25 +221,41 @@ mod tests {
         let chain = [leaf.clone(), root.clone()];
 
         let pem_path = directory.path().join("chain.PEM");
-        save(&pem_path, &chain).unwrap();
+        save(&pem_path, &chain, "CERTIFICATE").unwrap();
         let blocks = pem::parse(&fs::read_to_string(&pem_path).unwrap()).unwrap();
         assert_eq!(blocks.len(), 2);
         assert!(blocks.iter().all(|block| block.label == "CERTIFICATE"));
         assert_eq!([blocks[0].data.clone(), blocks[1].data.clone()], chain);
 
         let der_path = directory.path().join("leaf.DER");
-        save(&der_path, &chain[..1]).unwrap();
+        save(&der_path, &chain[..1], "CERTIFICATE").unwrap();
         assert_eq!(fs::read(&der_path).unwrap(), leaf);
         assert!(
-            save(&der_path, &chain[1..])
+            save(&der_path, &chain[1..], "CERTIFICATE")
                 .unwrap_err()
                 .contains("already exists")
         );
         assert_eq!(fs::read(&der_path).unwrap(), leaf);
 
+        let request = directory.path().join("request.csr");
+        save(&request, &chain[..1], Scope::Request.pem_label()).unwrap();
+        let blocks = pem::parse(&fs::read_to_string(&request).unwrap()).unwrap();
+        assert_eq!(blocks[0].label, "CERTIFICATE REQUEST");
+
         let rejected = directory.path().join("chain.der");
-        assert!(save(&rejected, &chain).unwrap_err().contains(".pem"));
+        assert!(
+            save(&rejected, &chain, "CERTIFICATE")
+                .unwrap_err()
+                .contains(".pem")
+        );
         assert!(!rejected.exists());
-        assert!(save(&directory.path().join("missing/leaf.pem"), &chain).is_err());
+        assert!(
+            save(
+                &directory.path().join("missing/leaf.pem"),
+                &chain,
+                "CERTIFICATE"
+            )
+            .is_err()
+        );
     }
 }
