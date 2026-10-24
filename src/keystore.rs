@@ -48,13 +48,32 @@ impl std::error::Error for Error {}
 pub struct KeystoreEntry {
     pub alias: String,
     pub kind: &'static str,
-    /// The entry's certificate, or the first of a private key's chain.
+    /// The entry's certificate, the first of a private key's chain, or a
+    /// certificate request's subject and key.
     pub certificate: Option<Summary>,
-    /// Original DER in leaf-first stored order, including unreadable certificates.
-    pub certificates: Vec<Vec<u8>>,
+    pub content: Content,
     pub chain_warning: Option<&'static str>,
-    /// A PKCS#10 certificate request's DER. Such an entry stores no certificates.
-    pub request: Option<Vec<u8>>,
+}
+
+/// What an entry stores.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Content {
+    /// Original DER in leaf-first stored order, including unreadable
+    /// certificates. Empty for a secret key or a key without a chain.
+    Certificates(Vec<Vec<u8>>),
+    /// A PKCS#10 certificate request's DER.
+    Request(Vec<u8>),
+}
+
+#[cfg(test)]
+impl KeystoreEntry {
+    /// The stored certificates. Panics for a certificate request.
+    pub fn certificates(&self) -> &[Vec<u8>] {
+        match &self.content {
+            Content::Certificates(certificates) => certificates,
+            Content::Request(_) => panic!("a certificate request stores no certificates"),
+        }
+    }
 }
 
 /// A structurally valid keystore whose integrity digest has not been checked.
@@ -145,9 +164,8 @@ pub fn parse(mut data: Vec<u8>) -> Result<Keystore, Error> {
             alias,
             kind,
             certificate,
-            certificates,
+            content: Content::Certificates(certificates),
             chain_warning: None,
-            request: None,
         });
     }
     let body_len = data.len() - reader.remaining.len();
@@ -305,9 +323,8 @@ mod tests {
             alias: alias.into(),
             kind: "Private key",
             certificate: None,
-            certificates: vec![b"opaque synthetic certificate".to_vec()],
+            content: Content::Certificates(vec![b"opaque synthetic certificate".to_vec()]),
             chain_warning: None,
-            request: None,
         }
     }
 
@@ -316,16 +333,15 @@ mod tests {
             alias: alias.into(),
             kind: "Trusted certificate",
             certificate: None,
-            certificates: vec![b"opaque synthetic certificate".to_vec()],
+            content: Content::Certificates(vec![b"opaque synthetic certificate".to_vec()]),
             chain_warning: None,
-            request: None,
         }
     }
 
     fn fixture_cert(alias: &str) -> KeystoreEntry {
         KeystoreEntry {
             certificate: Some(fixture_summary()),
-            certificates: vec![fixture_certificate_der().to_vec()],
+            content: Content::Certificates(vec![fixture_certificate_der().to_vec()]),
             ..cert(alias)
         }
     }
@@ -343,10 +359,10 @@ mod tests {
             load_entries(&data.finish(""), "").unwrap(),
             [KeystoreEntry {
                 certificate: Some(fixture_summary()),
-                certificates: vec![
+                content: Content::Certificates(vec![
                     fixture_certificate_der().to_vec(),
                     b"opaque synthetic certificate".to_vec()
-                ],
+                ]),
                 ..key("key")
             }]
         );
@@ -472,7 +488,7 @@ mod tests {
         assert_eq!(
             load_entries(&builder.finish(""), "").unwrap(),
             [KeystoreEntry {
-                certificates: vec![],
+                content: Content::Certificates(vec![]),
                 ..key("key")
             }]
         );
@@ -624,9 +640,8 @@ mod tests {
             alias: alias.into(),
             kind: "Secret key",
             certificate: None,
-            certificates: vec![],
+            content: Content::Certificates(vec![]),
             chain_warning: None,
-            request: None,
         }
     }
 

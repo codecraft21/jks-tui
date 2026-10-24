@@ -9,6 +9,7 @@ use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
 use super::*;
 use certificate::Summary;
+use keystore::Content;
 use test_support::{
     KEYTOOL_JKS, TestDirectory, UNICODE_ALIAS_JKS, UNICODE_PASSWORD_JKS, empty_keystore,
     fixture_summary, mixed_keystore,
@@ -232,25 +233,22 @@ fn entry_list_shows_certificate_algorithm_key_size_and_expiry() {
                 alias: "current".into(),
                 kind: "Trusted certificate",
                 certificate: Some(fixture_summary()),
-                certificates: vec![],
+                content: Content::Certificates(vec![]),
                 chain_warning: None,
-                request: None,
             },
             KeystoreEntry {
                 alias: "expired".into(),
                 kind: "Private key",
                 certificate: Some(expired),
-                certificates: vec![],
+                content: Content::Certificates(vec![]),
                 chain_warning: None,
-                request: None,
             },
             KeystoreEntry {
                 alias: "secret".into(),
                 kind: "Secret key",
                 certificate: None,
-                certificates: vec![],
+                content: Content::Certificates(vec![]),
                 chain_warning: None,
-                request: None,
             },
         ],
     );
@@ -345,9 +343,8 @@ fn partial_pkcs12_warning_persists_with_entries() {
                 alias: "readable".into(),
                 kind: "Secret key",
                 certificate: None,
-                certificates: vec![],
+                content: Content::Certificates(vec![]),
                 chain_warning: None,
-                request: None,
             }],
             incomplete: true,
         },
@@ -659,9 +656,8 @@ fn entry_list_scrolls_to_entries_below_the_viewport() {
                 alias: format!("entry-{index:02}"),
                 kind: "Trusted certificate",
                 certificate: None,
-                certificates: vec![],
+                content: Content::Certificates(vec![]),
                 chain_warning: None,
-                request: None,
             })
             .collect(),
     );
@@ -769,9 +765,8 @@ fn enter_opens_full_screen_details_and_escape_preserves_list_state() {
                 alias: format!("entry-{i:02}"),
                 kind: "Trusted certificate",
                 certificate: Some(fixture_summary()),
-                certificates: certificates.clone(),
+                content: Content::Certificates(certificates.clone()),
                 chain_warning: None,
-                request: None,
             })
             .collect(),
     );
@@ -829,9 +824,8 @@ fn enter_handles_empty_lists_and_entries_without_certificates() {
             alias: "secret".into(),
             kind: "Secret key",
             certificate: None,
-            certificates: vec![],
+            content: Content::Certificates(vec![]),
             chain_warning: None,
-            request: None,
         }],
     );
     press(&mut app, KeyCode::Enter);
@@ -850,9 +844,8 @@ fn certificate_entry(alias: &str, not_after: Asn1Time) -> KeystoreEntry {
             not_after: Some(not_after),
             ..fixture_summary()
         }),
-        certificates: vec![test_support::fixture_certificate_der().to_vec()],
+        content: Content::Certificates(vec![test_support::fixture_certificate_der().to_vec()]),
         chain_warning: None,
-        request: None,
     }
 }
 
@@ -868,9 +861,8 @@ fn triage_app() -> App {
                 alias: "gamma".into(),
                 kind: "Secret key",
                 certificate: None,
-                certificates: vec![],
+                content: Content::Certificates(vec![]),
                 chain_warning: None,
-                request: None,
             },
             certificate_entry("zeta", date(2030)),
         ],
@@ -1178,9 +1170,8 @@ fn details_export_certificates_next_to_the_opened_file() {
             alias: "server".into(),
             kind: "Private key",
             certificate: None,
-            certificates: vec![leaf.clone(), root.clone()],
+            content: Content::Certificates(vec![leaf.clone(), root.clone()]),
             chain_warning: None,
-            request: None,
         }],
     );
     press(&mut app, KeyCode::Enter);

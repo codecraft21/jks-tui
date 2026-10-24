@@ -11,7 +11,10 @@ use crown::{
 };
 use zeroize::Zeroizing;
 
-use crate::{certificate, certificate_file, keystore::KeystoreEntry};
+use crate::{
+    certificate, certificate_file,
+    keystore::{Content, KeystoreEntry},
+};
 
 const MAX_ITERATIONS: u32 = 1_000_000;
 const MAX_SALT_SIZE: usize = 64;
@@ -149,9 +152,8 @@ impl Store {
                     alias,
                     kind: "Private key",
                     certificate: leaf.and_then(certificate::summarize),
-                    certificates,
+                    content: Content::Certificates(certificates),
                     chain_warning,
-                    request: None,
                 });
             }
         }
@@ -164,9 +166,8 @@ impl Store {
                             alias,
                             kind: "Secret key",
                             certificate: None,
-                            certificates: vec![],
+                            content: Content::Certificates(vec![]),
                             chain_warning: None,
-                            request: None,
                         });
                     } else {
                         incomplete = true;
@@ -182,9 +183,12 @@ impl Store {
                         .iter()
                         .any(|attr| attr.oid.matches(TRUSTED_KEY_USAGE))
                     {
-                        if entries.iter().any(|entry| {
-                            entry.kind == "Private key"
-                                && entry.certificates.iter().any(|stored| stored == der)
+                        if entries.iter().any(|entry| match &entry.content {
+                            Content::Certificates(stored) => {
+                                entry.kind == "Private key"
+                                    && stored.iter().any(|stored| stored == der)
+                            }
+                            Content::Request(_) => false,
                         }) {
                             continue;
                         }
@@ -200,9 +204,8 @@ impl Store {
                             alias,
                             kind: certificate_file::KIND,
                             certificate: certificate::summarize(der),
-                            certificates,
+                            content: Content::Certificates(certificates),
                             chain_warning,
-                            request: None,
                         });
                         continue;
                     }
@@ -217,9 +220,8 @@ impl Store {
                                 alias,
                                 kind: "Trusted certificate",
                                 certificate: certificate::summarize(der),
-                                certificates,
+                                content: Content::Certificates(certificates),
                                 chain_warning,
-                                request: None,
                             });
                         }
                     } else {
@@ -375,9 +377,8 @@ mod tests {
                     alias: "root-cert".into(),
                     kind: "Trusted certificate",
                     certificate: Some(fixture_summary()),
-                    certificates: vec![fixture_certificate_der().to_vec()],
+                    content: Content::Certificates(vec![fixture_certificate_der().to_vec()]),
                     chain_warning: None,
-                    request: None,
                 }]
             );
             assert!(!verified.incomplete);
@@ -396,9 +397,8 @@ mod tests {
                     alias: "JKS TUI test fixture".into(),
                     kind: certificate_file::KIND,
                     certificate: Some(fixture_summary()),
-                    certificates: vec![fixture_certificate_der().to_vec()],
+                    content: Content::Certificates(vec![fixture_certificate_der().to_vec()]),
                     chain_warning: None,
-                    request: None,
                 }]
             );
             assert!(!verified.incomplete);
@@ -453,17 +453,15 @@ mod tests {
                     alias: "private".into(),
                     kind: "Private key",
                     certificate: None,
-                    certificates: vec![],
+                    content: Content::Certificates(vec![]),
                     chain_warning: None,
-                    request: None,
                 },
                 KeystoreEntry {
                     alias: "secret".into(),
                     kind: "Secret key",
                     certificate: None,
-                    certificates: vec![],
+                    content: Content::Certificates(vec![]),
                     chain_warning: None,
-                    request: None,
                 },
             ]
         );
@@ -571,9 +569,8 @@ mod tests {
                     alias: "root-cert".into(),
                     kind: "Trusted certificate",
                     certificate: Some(fixture_summary()),
-                    certificates: vec![fixture_certificate_der().to_vec()],
+                    content: Content::Certificates(vec![fixture_certificate_der().to_vec()]),
                     chain_warning: None,
-                    request: None,
                 }]
             );
             assert!(!verified.incomplete);
@@ -623,11 +620,14 @@ mod tests {
         assert!(!verified.incomplete);
         // Chain members are not listed again, but an unrelated certificate is.
         assert_eq!(verified.entries.len(), 2);
-        assert_eq!(verified.entries[0].certificates, [leaf, intermediate, root]);
+        assert_eq!(
+            verified.entries[0].certificates(),
+            [leaf, intermediate, root]
+        );
         assert_eq!(verified.entries[0].chain_warning, None);
         assert_eq!(verified.entries[1].alias, "other");
         assert_eq!(verified.entries[1].kind, certificate_file::KIND);
-        assert_eq!(verified.entries[1].certificates, [unrelated]);
+        assert_eq!(verified.entries[1].certificates(), [unrelated]);
     }
 
     #[test]
@@ -658,7 +658,7 @@ mod tests {
         let listed: Vec<_> = verified
             .entries
             .iter()
-            .map(|entry| (entry.alias.as_str(), entry.kind, entry.certificates.len()))
+            .map(|entry| (entry.alias.as_str(), entry.kind, entry.certificates().len()))
             .collect();
         assert_eq!(
             listed,
@@ -694,11 +694,11 @@ mod tests {
         let verified = parse(&data).unwrap().verify("changeit").unwrap();
         assert!(!verified.incomplete);
         assert_eq!(verified.entries.len(), 2);
-        assert_eq!(verified.entries[0].certificates, [b"unreadable".to_vec()]);
+        assert_eq!(verified.entries[0].certificates(), [b"unreadable".to_vec()]);
         assert!(verified.entries[0].certificate.is_none());
-        assert_eq!(verified.entries[1].certificates, [negative]);
+        assert_eq!(verified.entries[1].certificates(), [negative]);
         assert_eq!(
-            certificate::details::Details::parse(&verified.entries[1].certificates[0])
+            certificate::details::Details::parse(&verified.entries[1].certificates()[0])
                 .unwrap()
                 .serial_decimal,
             "-1"

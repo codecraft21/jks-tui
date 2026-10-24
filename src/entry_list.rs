@@ -87,6 +87,7 @@ pub fn visible_entries(entries: &[KeystoreEntry], filter: &str, order: SortOrder
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keystore::Content;
     use crate::test_support::fixture_summary;
     use crown::asn1::Asn1Time;
 
@@ -98,9 +99,8 @@ mod tests {
                 not_after: Some(Asn1Time::new(year, month, day, 0, 0, 0, true).unwrap()),
                 ..fixture_summary()
             }),
-            certificates: vec![],
+            content: Content::Certificates(vec![]),
             chain_warning: None,
-            request: None,
         }
     }
 
