@@ -16,12 +16,12 @@ use ratatui::{
 
 use crate::{
     certificate::{
-        self,
+        self, Summary,
         details::{Details, fingerprint, time_text},
         extensions::Extension,
         signature::{self, Signature},
     },
-    certificate_request::{self, Request},
+    certificate_request::Request,
     export::{self, ExportPrompt, Outcome, Scope},
     keystore::KeystoreEntry,
 };
@@ -82,13 +82,13 @@ fn request_text(
     mut text: String,
     der: &[u8],
     request: Option<&Request>,
+    summary: Option<&Summary>,
     signature: Signature,
     sha1: bool,
 ) -> Text<'static> {
     let mut lines = Vec::new();
     if let Some(request) = request {
-        let summary = certificate_request::summarize(der);
-        let public_key = summary.as_ref().map_or_else(
+        let public_key = summary.map_or_else(
             || "Unavailable".into(),
             |summary| format!("{} {}", summary.algorithm, summary.key_size_text()),
         );
@@ -174,18 +174,21 @@ impl EntryDetails {
                 ))
             })
             .collect();
+        // Only a request whose details can be shown is checked, so the
+        // hierarchy tag and the details always agree.
         let request = data
             .request
             .as_deref()
-            .map(|der| (Request::parse(der).ok(), signature::verify_request(der)));
-        let rows = if request.is_some() {
-            1
-        } else {
-            certificates.len()
-        };
-        Self {
+            .map(|der| match Request::parse(der) {
+                Ok(request) => (Some(request), signature::verify_request(der)),
+                Err(_) => (
+                    None,
+                    Signature::Unchecked("the request could not be decoded"),
+                ),
+            });
+        let mut view = Self {
             entry,
-            hierarchy: TableState::default().with_selected(rows.checked_sub(1)),
+            hierarchy: TableState::default(),
             metadata,
             signatures,
             // A request has no hierarchy to navigate, so its details take the keys.
@@ -198,7 +201,9 @@ impl EntryDetails {
             directory,
             export: None,
             message: None,
-        }
+        };
+        view.hierarchy.select(view.rows().checked_sub(1));
+        view
     }
 
     /// Whether keys are typed into an export file name instead of acting as shortcuts.
@@ -323,7 +328,8 @@ impl EntryDetails {
             text.push_str(&format!("{warning}\n\n"));
         }
         if let (Some(der), Some((request, signature))) = (&entry.request, &self.request) {
-            return request_text(text, der, request.as_ref(), *signature, self.sha1);
+            let summary = entry.certificate.as_ref();
+            return request_text(text, der, request.as_ref(), summary, *signature, self.sha1);
         }
         let Some(index) = self.selected_certificate() else {
             text.push_str("No certificate is stored with this entry.");
@@ -827,7 +833,7 @@ mod tests {
         let at = altered.windows(6).position(|w| w == b"device").unwrap();
         altered[at] = b'D';
         let altered_entry = KeystoreEntry {
-            kind: certificate_request::KIND,
+            kind: crate::certificate_request::KIND,
             request: Some(altered),
             ..entry(vec![])
         };
@@ -841,14 +847,21 @@ mod tests {
             "Attributes:\n  Challenge Password (1.2.840.113549.1.9.7)\n    Present; not shown.\n"
         ));
         assert!(!text.contains("synthetic"));
-        let junk = KeystoreEntry {
-            request: Some(b"junk".to_vec()),
-            ..altered_entry
-        };
-        let mut view = EntryDetails::new(0, &junk, PathBuf::new());
-        let screen = draw(&mut view, &junk, 100, 30);
-        assert!(screen.contains("Certificate request (unreadable or unnamed) [unchecked]"));
-        assert!(screen.contains("Certificate request could not be decoded."));
+        // Trailing data still verifies, but the details cannot be read, so
+        // the request is not reported as verified.
+        let mut trailing = data.request.clone().unwrap();
+        trailing.push(0);
+        for request in [b"junk".to_vec(), trailing] {
+            let junk = KeystoreEntry {
+                kind: crate::certificate_request::KIND,
+                request: Some(request),
+                ..entry(vec![])
+            };
+            let mut view = EntryDetails::new(0, &junk, PathBuf::new());
+            let screen = draw(&mut view, &junk, 100, 30);
+            assert!(screen.contains("Certificate request (unreadable or unnamed) [unchecked]"));
+            assert!(screen.contains("Certificate request could not be decoded."));
+        }
     }
 
     #[test]

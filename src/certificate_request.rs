@@ -10,7 +10,7 @@ use crate::certificate::{
     Summary,
     details::signature_name,
     extensions::{Extension, hex, printable},
-    public_key, security, subject_text,
+    name_alias, public_key, security, subject_text,
 };
 
 pub const KIND: &str = "Certificate request";
@@ -68,10 +68,20 @@ impl Request {
     /// A malformed attribute is described, not fatal to the other fields.
     fn add_attribute(&mut self, encoding: &[u8]) {
         let Ok((oid, values)) = attribute_fields(encoding) else {
-            self.attributes.push((
-                "Malformed attribute".into(),
-                vec![format!("Could not decode; encoding: {}", hex(encoding))],
-            ));
+            let oid = Reader::new(encoding)
+                .read_sequence()
+                .and_then(|mut attribute| attribute.read_oid());
+            // A challenge password stays hidden even when it is malformed.
+            self.attributes.push(match oid {
+                Ok(oid) if oid.matches(OID_CHALLENGE_PASSWORD) => (
+                    format!("Challenge Password ({oid})"),
+                    vec!["Could not decode; value not shown.".into()],
+                ),
+                _ => (
+                    "Malformed attribute".into(),
+                    vec![format!("Could not decode; encoding: {}", hex(encoding))],
+                ),
+            });
             return;
         };
         if oid.matches(OID_EXTENSION_REQUEST) || oid.matches(OID_MS_EXTENSION_REQUEST) {
@@ -168,13 +178,7 @@ pub fn summarize(encoding: &[u8]) -> Option<Summary> {
 pub fn subject_name(encoding: &[u8]) -> Option<String> {
     Request::parse(encoding)
         .ok()
-        .and_then(|request| {
-            request
-                .subject
-                .common_name()
-                .or_else(|| Some(request.subject.to_string()))
-        })
-        .filter(|name| !name.is_empty())
+        .and_then(|request| name_alias(&request.subject))
 }
 
 #[cfg(test)]
@@ -261,6 +265,14 @@ mod tests {
                 attribute(&[1, 2, 3], &[der::null()]),
                 attribute(OID_EXTENSION_REQUEST, &[der::null()]),
                 der::sequence(&der::null()),
+                // A value outside the SET, so the attribute is malformed.
+                der::sequence(
+                    &[
+                        der::oid(&ObjectIdentifier::new(OID_CHALLENGE_PASSWORD).unwrap()),
+                        der::utf8_string("synthetic"),
+                    ]
+                    .concat(),
+                ),
             ],
         );
         let request = Request::parse(&der).unwrap();
@@ -285,6 +297,10 @@ mod tests {
                 (
                     "Malformed attribute".into(),
                     vec!["Could not decode; encoding: 30:02:05:00".into()]
+                ),
+                (
+                    "Challenge Password (1.2.840.113549.1.9.7)".into(),
+                    vec!["Could not decode; value not shown.".into()]
                 ),
             ]
         );

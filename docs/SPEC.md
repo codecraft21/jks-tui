@@ -247,14 +247,15 @@ document, and also the README if users will notice.
     [Extensions](#extensions); `Requested extensions: None` when there are none
   - "Attributes:", only when the request has other attributes. A challenge
     password is shown as `Present; not shown.` and its value is never
-    displayed. An unstructured name is shown as text, with control characters
+    displayed, not even in hex when the attribute is malformed. An unstructured name is shown as text, with control characters
     escaped. Other attributes show their OID and each value in hex. An
     extension request whose value cannot be decoded is listed here with
     `Could not decode; value:` and its hex, and a malformed attribute as
     "Malformed attribute" with its encoding in hex.
   - a closing note that a request has no issuer or validity and is not trusted.
-- A request whose fields cannot be decoded shows "Certificate request could not
-  be decoded." and its fingerprint.
+- A request whose fields cannot be decoded, including one with data after it,
+  shows "Certificate request could not be decoded." and its fingerprint, and
+  its signature is `[unchecked]`.
 - The signature is checked with the request's own public key, as for a
   self-signed certificate. The details line reads `verified with its own public
   key.`, `does not verify with its own public key: <reason>.`, or `not checked

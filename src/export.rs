@@ -28,6 +28,22 @@ impl Scope {
         }
     }
 
+    /// The suggested file name extension.
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Certificate | Self::Chain => "pem",
+            Self::Request => "csr",
+        }
+    }
+
+    /// The suggested name when the alias gives none.
+    fn default_stem(self) -> &'static str {
+        match self {
+            Self::Certificate | Self::Chain => "certificate",
+            Self::Request => "request",
+        }
+    }
+
     /// The PEM block label for what this scope saves.
     pub fn pem_label(self) -> &'static str {
         match self {
@@ -65,21 +81,12 @@ impl ExportPrompt {
             })
             .collect();
         if stem.trim_matches('.').is_empty() {
-            stem = if scope == Scope::Request {
-                "request"
-            } else {
-                "certificate"
-            }
-            .into();
+            stem = scope.default_stem().into();
         }
         if scope == Scope::Chain {
             stem.push_str("-chain");
         }
-        let extension = if scope == Scope::Request {
-            "csr"
-        } else {
-            "pem"
-        };
+        let extension = scope.extension();
         let path = (1..100)
             .map(|n| match n {
                 1 => directory.join(format!("{stem}.{extension}")),

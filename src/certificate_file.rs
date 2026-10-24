@@ -72,10 +72,8 @@ pub fn parse(data: &[u8]) -> Result<CertificateFile, &'static str> {
                 _ => skipped = true,
             }
         }
-    } else if is_single_der(data) && certificate::summarize(data).is_some() {
-        items.push(Item::Certificate(data.to_vec()));
-    } else if is_single_der(data) && certificate_request::summarize(data).is_some() {
-        items.push(Item::Request(data.to_vec()));
+    } else if let Some(item) = single_der_item(data) {
+        items.push(item);
     } else {
         items = pkcs7_certificates(data)?
             .into_iter()
@@ -91,11 +89,18 @@ pub fn parse(data: &[u8]) -> Result<CertificateFile, &'static str> {
     })
 }
 
-/// Whether the data is exactly one DER element.
-fn is_single_der(data: &[u8]) -> bool {
-    Reader::new(data)
-        .read_raw_tlv()
-        .is_ok_and(|tlv| tlv.len() == data.len())
+/// A certificate or request that is exactly one DER element.
+fn single_der_item(data: &[u8]) -> Option<Item> {
+    let tlv = Reader::new(data).read_raw_tlv().ok()?;
+    if tlv.len() != data.len() {
+        None
+    } else if certificate::summarize(data).is_some() {
+        Some(Item::Certificate(data.to_vec()))
+    } else if certificate_request::summarize(data).is_some() {
+        Some(Item::Request(data.to_vec()))
+    } else {
+        None
+    }
 }
 
 /// The X.509 certificates of a PKCS#7 SignedData, as exact DER.
@@ -213,12 +218,7 @@ fn alias(index: usize, der: &[u8]) -> String {
 pub fn subject_name(der: &[u8]) -> Option<String> {
     Details::parse(der)
         .ok()
-        .and_then(|info| {
-            info.subject
-                .common_name()
-                .or_else(|| Some(info.subject.to_string()))
-        })
-        .filter(|name| !name.is_empty())
+        .and_then(|info| certificate::name_alias(&info.subject))
 }
 
 #[cfg(test)]

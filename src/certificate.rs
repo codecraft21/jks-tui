@@ -75,6 +75,14 @@ pub fn summarize(der: &[u8]) -> Option<Summary> {
     })
 }
 
+/// The common name, else the whole name, if either is non-empty: how
+/// certificates and requests without a stored alias are named.
+pub fn name_alias(name: &Name) -> Option<String> {
+    name.common_name()
+        .or_else(|| Some(name.to_string()))
+        .filter(|name| !name.is_empty())
+}
+
 /// The decoded distinguished name, or empty when it cannot be decoded.
 pub fn subject_text(name: &[u8]) -> String {
     Name::parse(&mut Reader::new(name))
