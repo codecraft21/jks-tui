@@ -1,5 +1,8 @@
 //! Full-screen, read-only entry inspection, independent of the entry table state.
 //! A certificate request entry shows the request in place of a hierarchy.
+mod chain;
+mod request;
+
 use std::{
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
@@ -15,16 +18,12 @@ use ratatui::{
 };
 
 use crate::{
-    certificate::{
-        self, Summary,
-        details::{Details, fingerprint, time_text},
-        extensions::Extension,
-        signature::{self, Signature},
-    },
-    certificate_request::Request,
+    certificate::{Summary, details::fingerprint, extensions::Extension, signature::Signature},
     export::{self, ExportPrompt, Outcome, Scope},
-    keystore::KeystoreEntry,
+    keystore::{Content, KeystoreEntry},
 };
+use chain::ChainView;
+use request::RequestView;
 
 /// An indented section; each extension's title is followed by its decoded values.
 fn extensions_text(heading: &str, extensions: &[Extension]) -> String {
@@ -49,6 +48,32 @@ fn section_text(heading: &str, items: &[(String, Vec<String>)]) -> String {
     }
     text.push('\n');
     text
+}
+
+/// The public key's algorithm and size, or `Unavailable` when it cannot be read.
+fn public_key_text(summary: Option<&Summary>) -> String {
+    summary.map_or_else(
+        || "Unavailable".into(),
+        |summary| format!("{} {}", summary.algorithm, summary.key_size_text()),
+    )
+}
+
+/// A highlighted line for each weakness.
+fn weakness_lines(summary: Option<&Summary>) -> Vec<Line<'static>> {
+    summary
+        .iter()
+        .flat_map(|summary| &summary.weaknesses)
+        .map(|weakness| Line::from(format!("Weak: {weakness}.")).yellow())
+        .collect()
+}
+
+/// The fingerprint paragraph, in SHA-1 or SHA-256.
+fn fingerprint_text(der: &[u8], sha1: bool) -> String {
+    format!(
+        "Fingerprint ({}): {}\n\n",
+        if sha1 { "SHA-1" } else { "SHA-256" },
+        fingerprint(der, sha1)
+    )
 }
 
 /// A signature check's details line, naming the key it used.
@@ -77,66 +102,17 @@ fn hierarchy_row(label: String, weak: bool, signature: Option<Signature>) -> Row
     Row::new([Line::from(spans)])
 }
 
-/// The detail text of a certificate request entry, after the alias and type.
-fn request_text(
-    mut text: String,
-    der: &[u8],
-    request: Option<&Request>,
-    summary: Option<&Summary>,
-    signature: Signature,
-    sha1: bool,
-) -> Text<'static> {
-    let mut lines = Vec::new();
-    if let Some(request) = request {
-        let public_key = summary.map_or_else(
-            || "Unavailable".into(),
-            |summary| format!("{} {}", summary.algorithm, summary.key_size_text()),
-        );
-        text.push_str(&format!(
-            "Version: {}\n\nSubject: {}\n\nPublic Key: {public_key}\n\nSignature Algorithm: {}\n",
-            request.version, request.subject, request.signature_algorithm,
-        ));
-        lines.extend(Text::from(text).lines);
-        for weakness in summary.iter().flat_map(|summary| &summary.weaknesses) {
-            lines.push(Line::from(format!("Weak: {weakness}.")).yellow());
-        }
-        lines.push(signature_line(signature, "its own public key"));
-        text = "\n".into();
-    } else {
-        text.push_str("Certificate request could not be decoded.\n\n");
-    }
-    text.push_str(&format!(
-        "Fingerprint ({}): {}\n\n",
-        if sha1 { "SHA-1" } else { "SHA-256" },
-        fingerprint(der, sha1)
-    ));
-    if let Some(request) = request {
-        text.push_str(&extensions_text(
-            "Requested extensions",
-            &request.extensions,
-        ));
-        if !request.attributes.is_empty() {
-            text.push_str(&section_text("Attributes", &request.attributes));
-        }
-    }
-    text.push_str(
-        "A request is not a certificate: it has no issuer or validity, and nothing in it is trusted.",
-    );
-    lines.extend(Text::from(text).lines);
-    Text::from(lines)
+/// What the view shows, from the entry's content.
+enum View {
+    Chain(ChainView),
+    Request(RequestView),
 }
 
 pub struct EntryDetails {
-    pub entry: usize,
+    alias: String,
+    kind: &'static str,
     hierarchy: TableState,
-    metadata: Vec<Option<Details>>,
-    /// Each certificate's signature checked with the next stored certificate,
-    /// or with its own key when it is the last and self-issued. `None` when
-    /// the issuer is not stored.
-    signatures: Vec<Option<Signature>>,
-    /// For a certificate request entry: the decoded request, if readable, and
-    /// its signature checked with its own key.
-    request: Option<(Option<Request>, Signature)>,
+    view: View,
     details_focused: bool,
     sha1: bool,
     scroll: u16,
@@ -150,50 +126,24 @@ pub struct EntryDetails {
 }
 
 impl EntryDetails {
-    pub fn new(entry: usize, data: &KeystoreEntry, directory: PathBuf) -> Self {
-        let certificates = &data.certificates;
-        let metadata: Vec<_> = certificates
-            .iter()
-            .map(|der| Details::parse(der).ok())
-            .collect();
-        let signatures = (0..certificates.len())
-            .map(|index| {
-                let issuer = if index + 1 < certificates.len() {
-                    index + 1
-                } else if metadata[index]
-                    .as_ref()
-                    .is_some_and(|info| info.issuer == info.subject)
-                {
-                    index
-                } else {
-                    return None;
-                };
-                Some(signature::verify(
-                    &certificates[index],
-                    &certificates[issuer],
-                ))
-            })
-            .collect();
-        // Only a request whose details can be shown is checked, so the
-        // hierarchy tag and the details always agree.
-        let request = data
-            .request
-            .as_deref()
-            .map(|der| match Request::parse(der) {
-                Ok(request) => (Some(request), signature::verify_request(der)),
-                Err(_) => (
-                    None,
-                    Signature::Unchecked("the request could not be decoded"),
-                ),
-            });
-        let mut view = Self {
-            entry,
+    /// Decodes the entry once. The view keeps what it shows, so it does not
+    /// depend on the entry table afterwards.
+    pub fn new(entry: &KeystoreEntry, directory: PathBuf) -> Self {
+        let view = match &entry.content {
+            Content::Certificates { certificates, .. } => {
+                View::Chain(ChainView::new(certificates, entry.chain_warning))
+            }
+            Content::Request(der) => {
+                View::Request(RequestView::new(der, entry.certificate.clone()))
+            }
+        };
+        let mut details = Self {
+            alias: entry.alias.clone(),
+            kind: entry.kind(),
             hierarchy: TableState::default(),
-            metadata,
-            signatures,
             // A request has no hierarchy to navigate, so its details take the keys.
-            details_focused: request.is_some(),
-            request,
+            details_focused: matches!(view, View::Request(_)),
+            view,
             sha1: false,
             scroll: 0,
             page: 1,
@@ -202,8 +152,8 @@ impl EntryDetails {
             export: None,
             message: None,
         };
-        view.hierarchy.select(view.rows().checked_sub(1));
-        view
+        details.hierarchy.select(details.rows().checked_sub(1));
+        details
     }
 
     /// Whether keys are typed into an export file name instead of acting as shortcuts.
@@ -212,7 +162,7 @@ impl EntryDetails {
     }
 
     /// Handles a key press; returns `true` when the view should close.
-    pub fn handle_event(&mut self, key: KeyEvent, entry: &KeystoreEntry) -> bool {
+    pub fn handle_event(&mut self, key: KeyEvent) -> bool {
         if let Some(prompt) = &mut self.export {
             match prompt.handle_key(key) {
                 Outcome::Editing => self.message = None,
@@ -222,15 +172,7 @@ impl EntryDetails {
                 }
                 Outcome::Save(path) => {
                     let scope = prompt.scope;
-                    let items = match scope {
-                        Scope::Certificate => self
-                            .selected_certificate()
-                            .map(|index| vec![entry.certificates[index].clone()])
-                            .unwrap_or_default(),
-                        Scope::Chain => entry.certificates.clone(),
-                        Scope::Request => entry.request.iter().cloned().collect(),
-                    };
-                    match export::save(&path, &items, scope.pem_label()) {
+                    match export::save(&path, &self.export_items(scope), scope.pem_label()) {
                         Ok(()) => {
                             self.export = None;
                             self.message = Some((
@@ -248,42 +190,57 @@ impl EntryDetails {
         self.message = None;
         match key.code {
             KeyCode::Esc => return true,
-            KeyCode::Char('x') if entry.request.is_some() => {
-                self.export = Some(ExportPrompt::new(
-                    Scope::Request,
-                    &self.directory,
-                    &entry.alias,
-                ));
-            }
-            KeyCode::Char('x') | KeyCode::Char('X') if self.selected_certificate().is_some() => {
-                let scope = if key.code == KeyCode::Char('X') {
-                    Scope::Chain
-                } else {
-                    Scope::Certificate
-                };
-                self.export = Some(ExportPrompt::new(scope, &self.directory, &entry.alias));
+            KeyCode::Char(letter @ ('x' | 'X')) => {
+                if let Some(scope) = self.export_scope(letter == 'X') {
+                    self.export = Some(ExportPrompt::new(scope, &self.directory, &self.alias));
+                }
             }
             code => self.handle_key(code),
         }
         false
     }
 
-    /// The `metadata` and stored-certificate index selected in the hierarchy.
-    fn selected_certificate(&self) -> Option<usize> {
-        if self.request.is_some() {
-            return None;
+    /// What `x` exports: the request, or the selected certificate. With
+    /// `whole_chain` (`X`), the selected certificate's chain instead, which a
+    /// request does not have. `None` when there is nothing to export.
+    fn export_scope(&self, whole_chain: bool) -> Option<Scope> {
+        match &self.view {
+            View::Request(_) => (!whole_chain).then_some(Scope::Request),
+            View::Chain(chain) => {
+                self.selected(chain)?;
+                Some(if whole_chain {
+                    Scope::Chain
+                } else {
+                    Scope::Certificate
+                })
+            }
         }
+    }
+
+    /// The DER an export of `scope` saves.
+    fn export_items(&self, scope: Scope) -> Vec<Vec<u8>> {
+        match (&self.view, scope) {
+            (View::Request(view), _) => vec![view.der.clone()],
+            (View::Chain(chain), Scope::Chain) => chain.certificates.clone(),
+            (View::Chain(chain), _) => self
+                .selected(chain)
+                .map(|index| vec![chain.certificates[index].clone()])
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The stored-certificate index selected in the chain's hierarchy.
+    fn selected(&self, chain: &ChainView) -> Option<usize> {
         self.hierarchy
             .selected()
-            .map(|i| self.metadata.len() - 1 - i)
+            .map(|i| chain.certificates.len() - 1 - i)
     }
 
     /// The number of rows in the hierarchy pane.
     fn rows(&self) -> usize {
-        if self.request.is_some() {
-            1
-        } else {
-            self.metadata.len()
+        match &self.view {
+            View::Chain(chain) => chain.certificates.len(),
+            View::Request(_) => 1,
         }
     }
 
@@ -322,104 +279,27 @@ impl EntryDetails {
         }
     }
 
-    fn text(&self, entry: &KeystoreEntry, now: i64) -> Text<'static> {
-        let mut text = format!("Alias: {}\nType: {}\n\n", entry.alias, entry.kind);
-        if let Some(warning) = entry.chain_warning {
-            text.push_str(&format!("{warning}\n\n"));
+    fn text(&self, now: i64) -> Text<'static> {
+        let text = format!("Alias: {}\nType: {}\n\n", self.alias, self.kind);
+        match &self.view {
+            View::Request(view) => view.text(text, self.sha1),
+            View::Chain(chain) => chain.text(text, self.selected(chain), now, self.sha1),
         }
-        if let (Some(der), Some((request, signature))) = (&entry.request, &self.request) {
-            let summary = entry.certificate.as_ref();
-            return request_text(text, der, request.as_ref(), summary, *signature, self.sha1);
-        }
-        let Some(index) = self.selected_certificate() else {
-            text.push_str("No certificate is stored with this entry.");
-            return Text::from(text);
-        };
-        let mut lines = Vec::new();
-        if let Some(info) = &self.metadata[index] {
-            let summary = certificate::summarize(&entry.certificates[index]);
-            let public_key = summary.as_ref().map_or_else(
-                || "Unavailable".into(),
-                |summary| format!("{} {}", summary.algorithm, summary.key_size_text()),
-            );
-            text.push_str(&format!(
-                "Version: {}\n\nSubject: {}\n\nIssuer: {}\n\nSerial Number (hex): {}\n\nSerial Number (dec): {}\n\nValid From: {}\n\n",
-                info.version, info.subject, info.issuer, info.serial_hex, info.serial_decimal,
-                time_text(&info.not_before),
-            ));
-            lines.extend(Text::from(text).lines);
-            let expiry = Span::raw(time_text(&info.not_after));
-            lines.push(Line::from(vec![
-                Span::raw("Valid Until: "),
-                if info.not_after.to_unix() < now {
-                    expiry.red()
-                } else {
-                    expiry
-                },
-            ]));
-            lines.extend(
-                Text::from(format!(
-                    "\nPublic Key: {public_key}\n\nSignature Algorithm: {}\n",
-                    info.signature_algorithm,
-                ))
-                .lines,
-            );
-            for weakness in summary.iter().flat_map(|summary| &summary.weaknesses) {
-                lines.push(Line::from(format!("Weak: {weakness}.")).yellow());
-            }
-            lines.push(self.signature_line(index));
-            text = "\n".into();
-        } else {
-            text.push_str("Certificate could not be decoded.\n\n");
-        }
-        text.push_str(&format!(
-            "Fingerprint ({}): {}\n\n",
-            if self.sha1 { "SHA-1" } else { "SHA-256" },
-            fingerprint(&entry.certificates[index], self.sha1)
-        ));
-        if let Some(info) = &self.metadata[index] {
-            text.push_str(&extensions_text("Extensions", &info.extensions));
-        }
-        text.push_str(
-            "Stored certificates only; signatures are checked within the chain, trust is not verified.",
-        );
-        if entry.chain_warning.is_none()
-            && self
-                .metadata
-                .last()
-                .and_then(Option::as_ref)
-                .is_some_and(|info| info.issuer != info.subject)
-        {
-            text.push_str("\nIssuer certificate is not stored in this chain.");
-        }
-        lines.extend(Text::from(text).lines);
-        Text::from(lines)
     }
 
-    /// The selected certificate's signature check, naming the key it used.
-    fn signature_line(&self, index: usize) -> Line<'static> {
-        let Some(result) = self.signatures[index] else {
-            return Line::from("Signature: not checked (the issuer certificate is not stored).");
-        };
-        let key = if index + 1 == self.metadata.len() {
-            "its own public key (self-signed)".to_string()
-        } else {
-            let issuer = self.metadata[index + 1]
-                .as_ref()
-                .map(|info| info.subject.to_string())
-                .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| format!("certificate {}", index + 2));
-            format!("the public key of {issuer}")
-        };
-        signature_line(result, &key)
-    }
-
-    pub fn draw(&mut self, frame: &mut Frame, entry: &KeystoreEntry) {
+    pub fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
-        let shortcuts = if self.request.is_some() {
-            "Tab Focus | ↑/↓ j/k Scroll | PgUp/PgDn Home/End Scroll\nf SHA-256/SHA-1 | x Export request | Esc Back | q / Ctrl+C Quit"
-        } else {
-            "Tab Focus | ↑/↓ j/k Navigate | PgUp/PgDn Home/End Scroll\nf SHA-256/SHA-1 | x Export certificate | X Export chain | Esc Back | q / Ctrl+C Quit"
+        let (shortcuts, tree_title, details_title) = match &self.view {
+            View::Chain(_) => (
+                "Tab Focus | ↑/↓ j/k Navigate | PgUp/PgDn Home/End Scroll\nf SHA-256/SHA-1 | x Export certificate | X Export chain | Esc Back | q / Ctrl+C Quit",
+                "Certificate hierarchy",
+                "Certificate details",
+            ),
+            View::Request(_) => (
+                "Tab Focus | ↑/↓ j/k Scroll | PgUp/PgDn Home/End Scroll\nf SHA-256/SHA-1 | x Export request | Esc Back | q / Ctrl+C Quit",
+                "Certificate request",
+                "Request details",
+            ),
         };
         let minimum = Paragraph::new(shortcuts)
             .wrap(Wrap { trim: false })
@@ -443,7 +323,7 @@ impl EntryDetails {
         ])
         .areas(area);
         frame.render_widget(
-            Paragraph::new(format!("{} — {}", entry.alias, entry.kind))
+            Paragraph::new(format!("{} — {}", self.alias, self.kind))
                 .blue()
                 .bold(),
             header,
@@ -458,11 +338,6 @@ impl EntryDetails {
         let [hierarchy, details] =
             Layout::vertical([Constraint::Length(tree_height), Constraint::Min(3)]).areas(content);
         let focused = |focus| if focus { Color::Blue } else { Color::Reset };
-        let (tree_title, details_title) = if self.request.is_some() {
-            ("Certificate request", "Request details")
-        } else {
-            ("Certificate hierarchy", "Certificate details")
-        };
         let tree_block = Block::bordered()
             .title(if self.details_focused {
                 format!(" {tree_title} ")
@@ -470,57 +345,25 @@ impl EntryDetails {
                 format!(" {tree_title} [focused] ")
             })
             .border_style(Style::default().fg(focused(!self.details_focused)));
-        let highlight = Style::default()
-            .fg(Color::Rgb(0, 0, 0))
-            .bg(Color::Rgb(175, 255, 255))
-            .bold();
-        if let Some((request, signature)) = &self.request {
-            let label = request
-                .as_ref()
-                .map(|request| request.subject.to_string())
-                .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| "Certificate request (unreadable or unnamed)".into());
-            let weak = entry
-                .certificate
-                .as_ref()
-                .is_some_and(|summary| !summary.weaknesses.is_empty());
-            let table = Table::new(
-                [hierarchy_row(label, weak, Some(*signature))],
-                [Constraint::Min(0)],
-            )
-            .block(tree_block)
-            .highlight_symbol("> ")
-            .row_highlight_style(highlight);
-            frame.render_stateful_widget(table, hierarchy, &mut self.hierarchy);
-        } else if self.metadata.is_empty() {
+        let rows = match &self.view {
+            View::Chain(chain) => chain.hierarchy_rows(),
+            View::Request(view) => vec![view.hierarchy_row()],
+        };
+        if rows.is_empty() {
             frame.render_widget(
                 Paragraph::new("No certificate").block(tree_block),
                 hierarchy,
             );
         } else {
-            let rows =
-                self.metadata
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .enumerate()
-                    .map(|(depth, (index, info))| {
-                        let label = info
-                            .as_ref()
-                            .map(|info| info.subject.to_string())
-                            .filter(|name| !name.is_empty())
-                            .unwrap_or_else(|| {
-                                format!("Certificate {} (unreadable or unnamed)", index + 1)
-                            });
-                        let weak = certificate::summarize(&entry.certificates[index])
-                            .is_some_and(|summary| !summary.weaknesses.is_empty());
-                        let indent = "  ".repeat(depth.min(8));
-                        hierarchy_row(format!("{indent}{label}"), weak, self.signatures[index])
-                    });
             let table = Table::new(rows, [Constraint::Min(0)])
                 .block(tree_block)
                 .highlight_symbol("> ")
-                .row_highlight_style(highlight);
+                .row_highlight_style(
+                    Style::default()
+                        .fg(Color::Rgb(0, 0, 0))
+                        .bg(Color::Rgb(175, 255, 255))
+                        .bold(),
+                );
             frame.render_stateful_widget(table, hierarchy, &mut self.hierarchy);
         }
         let block = Block::bordered()
@@ -534,7 +377,7 @@ impl EntryDetails {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_secs() as i64);
-        let paragraph = Paragraph::new(self.text(entry, now)).wrap(Wrap { trim: false });
+        let paragraph = Paragraph::new(self.text(now)).wrap(Wrap { trim: false });
         self.page = inner.height.max(1);
         self.max_scroll = u16::try_from(
             paragraph
@@ -572,7 +415,9 @@ impl EntryDetails {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::metadata_certificate;
+    use crate::{
+        certificate::details::time_text, keystore::Kind, test_support::metadata_certificate,
+    };
     use crown::asn1::{der, oid::ObjectIdentifier};
     use ratatui::{Terminal, backend::TestBackend};
     use std::path::Path;
@@ -580,17 +425,18 @@ mod tests {
     fn entry(certificates: Vec<Vec<u8>>) -> KeystoreEntry {
         KeystoreEntry {
             alias: "test-entry".into(),
-            kind: "Private key",
             certificate: None,
-            certificates,
+            content: Content::Certificates {
+                kind: Kind::PrivateKey,
+                certificates,
+            },
             chain_warning: None,
-            request: None,
         }
     }
 
-    fn draw(details: &mut EntryDetails, entry: &KeystoreEntry, width: u16, height: u16) -> String {
+    fn draw(details: &mut EntryDetails, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|frame| details.draw(frame, entry)).unwrap();
+        terminal.draw(|frame| details.draw(frame)).unwrap();
         terminal
             .backend()
             .buffer()
@@ -604,8 +450,11 @@ mod tests {
     #[test]
     fn only_expired_valid_until_timestamps_render_red() {
         let data = entry(vec![metadata_certificate("leaf", "root", &[1], &[])]);
-        let view = EntryDetails::new(0, &data, PathBuf::new());
-        let info = view.metadata[0].as_ref().unwrap();
+        let view = EntryDetails::new(&data, PathBuf::new());
+        let View::Chain(chain) = &view.view else {
+            panic!("a certificate entry shows its chain");
+        };
+        let info = chain.metadata[0].as_ref().unwrap();
         let expiry = info.not_after.to_unix();
         let timestamp = time_text(&info.not_after);
         for now in [expiry - 1, expiry, expiry + 1] {
@@ -613,7 +462,7 @@ mod tests {
             terminal
                 .draw(|frame| {
                     frame.render_widget(
-                        Paragraph::new(view.text(&data, now)).wrap(Wrap { trim: false }),
+                        Paragraph::new(view.text(now)).wrap(Wrap { trim: false }),
                         frame.area(),
                     );
                 })
@@ -636,36 +485,32 @@ mod tests {
             metadata_certificate("leaf", "root", &[1], &[]),
             metadata_certificate("root", "root", &[2], &[]),
         ]);
-        let mut view = EntryDetails::new(0, &data, PathBuf::new());
-        let screen = draw(&mut view, &data, 100, 50);
+        let mut view = EntryDetails::new(&data, PathBuf::new());
+        let screen = draw(&mut view, 100, 50);
         assert!(screen.find("CN=root").unwrap() < screen.find("CN=leaf").unwrap());
-        assert!(view.text(&data, 0).to_string().contains("Subject: CN=leaf"));
+        assert!(view.text(0).to_string().contains("Subject: CN=leaf"));
         assert!(!view.details_focused);
         view.handle_key(KeyCode::Char('f'));
         view.handle_key(KeyCode::End);
         view.handle_key(KeyCode::Up);
         assert_eq!(view.scroll, 0);
-        assert!(view.text(&data, 0).to_string().contains("Subject: CN=root"));
-        assert!(
-            view.text(&data, 0)
-                .to_string()
-                .contains("Fingerprint (SHA-1)")
-        );
+        assert!(view.text(0).to_string().contains("Subject: CN=root"));
+        assert!(view.text(0).to_string().contains("Fingerprint (SHA-1)"));
         view.handle_key(KeyCode::Char('j'));
-        assert!(view.text(&data, 0).to_string().contains("Subject: CN=leaf"));
+        assert!(view.text(0).to_string().contains("Subject: CN=leaf"));
     }
 
     #[test]
     fn wrapped_values_remain_accessible_with_scrolling_and_resizing() {
         let long_name = format!("{}THE-END", "long-name-界".repeat(30));
         let data = entry(vec![metadata_certificate(&long_name, "root", &[1], &[])]);
-        let mut view = EntryDetails::new(0, &data, PathBuf::new());
-        assert!(!draw(&mut view, &data, 40, 24).contains("THE-END"));
+        let mut view = EntryDetails::new(&data, PathBuf::new());
+        assert!(!draw(&mut view, 40, 24).contains("THE-END"));
         view.handle_key(KeyCode::Tab);
         assert!(view.details_focused);
         let mut seen = String::new();
         for _ in 0..view.max_scroll + 1 {
-            seen.push_str(&draw(&mut view, &data, 40, 24));
+            seen.push_str(&draw(&mut view, 40, 24));
             view.handle_key(KeyCode::Char('j'));
         }
         assert!(seen.contains("THE-END"));
@@ -681,7 +526,7 @@ mod tests {
         assert_eq!(view.scroll, 0);
         view.handle_key(KeyCode::End);
         assert_eq!(view.scroll, view.max_scroll);
-        draw(&mut view, &data, 160, 100);
+        draw(&mut view, 160, 100);
         assert_eq!(view.scroll, 0);
     }
 
@@ -699,14 +544,14 @@ mod tests {
             metadata_certificate("leaf", "root", &[1], &[critical_ca]),
             metadata_certificate("root", "root", &[2], &[]),
         ]);
-        let mut view = EntryDetails::new(0, &data, PathBuf::new());
-        let text = view.text(&data, 0).to_string();
+        let mut view = EntryDetails::new(&data, PathBuf::new());
+        let text = view.text(0).to_string();
         let fingerprint = text.find("Fingerprint (SHA-256)").unwrap();
         let section = text.find("Extensions:\n  Basic Constraints (2.5.29.19) [critical]\n    CA: true, path length: unlimited\n").unwrap();
         assert!(fingerprint < section);
         assert!(section < text.find("trust is not verified").unwrap());
         view.handle_key(KeyCode::Up);
-        assert!(view.text(&data, 0).to_string().contains("Extensions: None"));
+        assert!(view.text(0).to_string().contains("Extensions: None"));
     }
 
     #[test]
@@ -715,13 +560,13 @@ mod tests {
             b"unreadable".to_vec(),
             metadata_certificate("root", "root", &[2], &[]),
         ]);
-        let mut view = EntryDetails::new(0, &data, PathBuf::new());
-        let screen = draw(&mut view, &data, 100, 30);
+        let mut view = EntryDetails::new(&data, PathBuf::new());
+        let screen = draw(&mut view, 100, 30);
         assert!(screen.contains("Certificate 1"));
         assert!(screen.contains("Certificate could not be decoded"));
         assert!(screen.contains("Fingerprint (SHA-256)"));
         view.handle_key(KeyCode::Up);
-        assert!(draw(&mut view, &data, 100, 50).contains("Subject: CN=root"));
+        assert!(draw(&mut view, 100, 50).contains("Subject: CN=root"));
     }
 
     #[test]
@@ -732,13 +577,13 @@ mod tests {
             ed25519_certificate("intermediate", "root", 2, 9),
             ed25519_certificate("root", "root", 1, 1),
         ]);
-        let mut view = EntryDetails::new(0, &data, PathBuf::new());
-        let screen = draw(&mut view, &data, 100, 50);
+        let mut view = EntryDetails::new(&data, PathBuf::new());
+        let screen = draw(&mut view, 100, 50);
         assert!(screen.contains("CN=root [verified]"));
         assert!(screen.contains("CN=intermediate [bad signature]"));
         assert!(screen.contains("CN=leaf [verified]"));
         let line = |view: &EntryDetails| {
-            let text = view.text(&data, 0).to_string();
+            let text = view.text(0).to_string();
             text.lines()
                 .find(|line| line.starts_with("Signature: "))
                 .unwrap()
@@ -760,17 +605,20 @@ mod tests {
         );
 
         let lone = entry(vec![ed25519_certificate("leaf", "missing", 3, 2)]);
-        let mut view = EntryDetails::new(0, &lone, PathBuf::new());
-        assert!(draw(&mut view, &lone, 100, 50).contains("CN=leaf [unchecked]"));
+        let mut view = EntryDetails::new(&lone, PathBuf::new());
+        assert!(draw(&mut view, 100, 50).contains("CN=leaf [unchecked]"));
         assert!(
-            view.text(&lone, 0)
+            view.text(0)
                 .to_string()
                 .contains("Signature: not checked (the issuer certificate is not stored).")
         );
-        let unreadable = entry(vec![b"unreadable".to_vec(), data.certificates[2].clone()]);
-        let view = EntryDetails::new(0, &unreadable, PathBuf::new());
+        let unreadable = entry(vec![b"unreadable".to_vec(), data.certificates()[2].clone()]);
+        let view = EntryDetails::new(&unreadable, PathBuf::new());
+        let View::Chain(chain) = &view.view else {
+            panic!("a certificate entry shows its chain");
+        };
         assert_eq!(
-            view.signatures[0],
+            chain.signatures[0],
             Some(Signature::Unchecked("the certificate could not be decoded"))
         );
     }
@@ -783,14 +631,14 @@ mod tests {
         let file = crate::certificate_file::parse(KEYTOOL_REQUEST).unwrap();
         let data = &file.entries[0];
         let directory = TestDirectory::new();
-        let mut view = EntryDetails::new(0, data, directory.path().to_path_buf());
+        let mut view = EntryDetails::new(data, directory.path().to_path_buf());
         assert!(view.details_focused);
-        let screen = draw(&mut view, data, 120, 60);
+        let screen = draw(&mut view, 120, 60);
         assert!(screen.contains(" Certificate request "));
         assert!(screen.contains(" Request details [focused] "));
         assert!(screen.contains("O=keystore-tui,CN=CSR TUI test fixture [verified]"));
         assert!(screen.contains("x Export request"));
-        let text = view.text(data, 0).to_string();
+        let text = view.text(0).to_string();
         for expected in [
             "Type: Certificate request\n\nVersion: 1\n\nSubject: O=keystore-tui,CN=CSR TUI test fixture\n\nPublic Key: EC 256 bits\n\nSignature Algorithm: SHA-384 with ECDSA\nSignature: verified with its own public key.\n",
             "Fingerprint (SHA-256): ",
@@ -802,25 +650,21 @@ mod tests {
         }
         assert!(!text.contains("Attributes:"));
         view.handle_key(KeyCode::Char('f'));
-        assert!(
-            view.text(data, 0)
-                .to_string()
-                .contains("Fingerprint (SHA-1)")
-        );
+        assert!(view.text(0).to_string().contains("Fingerprint (SHA-1)"));
 
-        assert!(!view.handle_event(press(KeyCode::Char('X')), data));
+        assert!(!view.handle_event(press(KeyCode::Char('X'))));
         assert!(!view.exporting());
-        view.handle_event(press(KeyCode::Char('x')), data);
+        view.handle_event(press(KeyCode::Char('x')));
         let prompt = view.export.as_ref().unwrap();
         assert_eq!(prompt.scope, Scope::Request);
         let path = directory.path().join("CSR_TUI_test_fixture.csr");
         assert_eq!(Path::new(&prompt.path), path);
-        view.handle_event(press(KeyCode::Enter), data);
+        view.handle_event(press(KeyCode::Enter));
         assert!(!view.exporting());
         let saved = std::fs::read_to_string(&path).unwrap();
         let blocks = crown::asn1::pem::parse(&saved).unwrap();
         assert_eq!(blocks[0].label, "CERTIFICATE REQUEST");
-        assert_eq!(Some(&blocks[0].data), data.request.as_ref());
+        assert_eq!(Content::Request(blocks[0].data.clone()), data.content);
 
         let attributes = der::sequence(
             &[
@@ -833,13 +677,12 @@ mod tests {
         let at = altered.windows(6).position(|w| w == b"device").unwrap();
         altered[at] = b'D';
         let altered_entry = KeystoreEntry {
-            kind: crate::certificate_request::KIND,
-            request: Some(altered),
+            content: Content::Request(altered),
             ..entry(vec![])
         };
-        let mut view = EntryDetails::new(0, &altered_entry, PathBuf::new());
-        assert!(draw(&mut view, &altered_entry, 100, 50).contains("CN=Device [bad signature]"));
-        let text = view.text(&altered_entry, 0).to_string();
+        let mut view = EntryDetails::new(&altered_entry, PathBuf::new());
+        assert!(draw(&mut view, 100, 50).contains("CN=Device [bad signature]"));
+        let text = view.text(0).to_string();
         assert!(text.contains(
             "Signature: does not verify with its own public key: the signature does not match."
         ));
@@ -849,16 +692,17 @@ mod tests {
         assert!(!text.contains("synthetic"));
         // Trailing data still verifies, but the details cannot be read, so
         // the request is not reported as verified.
-        let mut trailing = data.request.clone().unwrap();
-        trailing.push(0);
+        let Content::Request(request) = &data.content else {
+            panic!("the fixture is a request");
+        };
+        let trailing = [&request[..], &[0]].concat();
         for request in [b"junk".to_vec(), trailing] {
             let junk = KeystoreEntry {
-                kind: crate::certificate_request::KIND,
-                request: Some(request),
+                content: Content::Request(request),
                 ..entry(vec![])
             };
-            let mut view = EntryDetails::new(0, &junk, PathBuf::new());
-            let screen = draw(&mut view, &junk, 100, 30);
+            let mut view = EntryDetails::new(&junk, PathBuf::new());
+            let screen = draw(&mut view, 100, 30);
             assert!(screen.contains("Certificate request (unreadable or unnamed) [unchecked]"));
             assert!(screen.contains("Certificate request could not be decoded."));
         }
@@ -870,15 +714,15 @@ mod tests {
             .map(|i| metadata_certificate(&format!("certificate-{i}"), "issuer", &[1], &[]))
             .collect();
         let data = entry(certificates);
-        let mut view = EntryDetails::new(0, &data, PathBuf::new());
-        assert!(draw(&mut view, &data, 80, 24).contains("CN=certificate-0"));
+        let mut view = EntryDetails::new(&data, PathBuf::new());
+        assert!(draw(&mut view, 80, 24).contains("CN=certificate-0"));
         for _ in 0..29 {
             view.handle_key(KeyCode::Up);
         }
-        assert!(draw(&mut view, &data, 80, 24).contains("CN=certificate-29"));
+        assert!(draw(&mut view, 80, 24).contains("CN=certificate-29"));
         for (width, height) in [(0, 0), (1, 1), (10, 5), (30, 10), (20, 30)] {
-            draw(&mut view, &data, width, height);
+            draw(&mut view, width, height);
         }
-        assert!(draw(&mut view, &data, 40, 8).contains("Resize terminal"));
+        assert!(draw(&mut view, 40, 8).contains("Resize terminal"));
     }
 }

@@ -5,7 +5,7 @@ use zeroize::Zeroize;
 
 use crate::{
     certificate::{self, Summary},
-    java_serialization,
+    certificate_request, java_serialization,
 };
 
 pub(crate) const MAGIC: u32 = 0xfeed_feed;
@@ -47,14 +47,65 @@ impl std::error::Error for Error {}
 #[derive(Debug, PartialEq, Eq)]
 pub struct KeystoreEntry {
     pub alias: String,
-    pub kind: &'static str,
-    /// The entry's certificate, or the first of a private key's chain.
+    /// The entry's certificate, the first of a private key's chain, or a
+    /// certificate request's subject and key.
     pub certificate: Option<Summary>,
-    /// Original DER in leaf-first stored order, including unreadable certificates.
-    pub certificates: Vec<Vec<u8>>,
+    pub content: Content,
     pub chain_warning: Option<&'static str>,
-    /// A PKCS#10 certificate request's DER. Such an entry stores no certificates.
-    pub request: Option<Vec<u8>>,
+}
+
+/// What an entry stores. A certificate request's type follows from its
+/// content, so no other entry can claim to be one.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Content {
+    Certificates {
+        kind: Kind,
+        /// Original DER in leaf-first stored order, including unreadable
+        /// certificates. Empty for a secret key or a key without a chain.
+        certificates: Vec<Vec<u8>>,
+    },
+    /// A PKCS#10 certificate request's DER.
+    Request(Vec<u8>),
+}
+
+/// The type of an entry that stores certificates (or none, for a secret key).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    PrivateKey,
+    TrustedCertificate,
+    SecretKey,
+    /// A certificate from a certificate file, or a PKCS12 certificate
+    /// without Java's trusted-certificate attribute.
+    Certificate,
+}
+
+impl Kind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::PrivateKey => "Private key",
+            Self::TrustedCertificate => "Trusted certificate",
+            Self::SecretKey => "Secret key",
+            Self::Certificate => "Certificate",
+        }
+    }
+}
+
+impl KeystoreEntry {
+    /// The entry's type, as shown.
+    pub fn kind(&self) -> &'static str {
+        match &self.content {
+            Content::Certificates { kind, .. } => kind.label(),
+            Content::Request(_) => certificate_request::KIND,
+        }
+    }
+
+    /// The stored certificates; a certificate request stores none.
+    pub fn certificates(&self) -> &[Vec<u8>] {
+        match &self.content {
+            Content::Certificates { certificates, .. } => certificates,
+            Content::Request(_) => &[],
+        }
+    }
 }
 
 /// A structurally valid keystore whose integrity digest has not been checked.
@@ -117,12 +168,12 @@ pub fn parse(mut data: Vec<u8>) -> Result<Keystore, Error> {
                         leaf = certificate::summarize(encoding);
                     }
                 }
-                ("Private key", leaf)
+                (Kind::PrivateKey, leaf)
             }
             TRUSTED_CERT_TAG => {
                 let encoding = reader.certificate(version)?;
                 certificates.push(encoding.to_vec());
-                ("Trusted certificate", certificate::summarize(encoding))
+                (Kind::TrustedCertificate, certificate::summarize(encoding))
             }
             SECRET_KEY_TAG if jceks => {
                 // Java writes the sealed key as a serialized object with no
@@ -137,17 +188,15 @@ pub fn parse(mut data: Vec<u8>) -> Result<Keystore, Error> {
                     return Err(Error::Invalid("unsupported secret key type in JCEKS data"));
                 }
                 reader.remaining = rest;
-                ("Secret key", None)
+                (Kind::SecretKey, None)
             }
             _ => return Err(Error::UnknownEntryTag(tag)),
         };
         entries.push(KeystoreEntry {
             alias,
-            kind,
             certificate,
-            certificates,
+            content: Content::Certificates { kind, certificates },
             chain_warning: None,
-            request: None,
         });
     }
     let body_len = data.len() - reader.remaining.len();
@@ -303,29 +352,34 @@ mod tests {
     fn key(alias: &str) -> KeystoreEntry {
         KeystoreEntry {
             alias: alias.into(),
-            kind: "Private key",
             certificate: None,
-            certificates: vec![b"opaque synthetic certificate".to_vec()],
+            content: Content::Certificates {
+                kind: Kind::PrivateKey,
+                certificates: vec![b"opaque synthetic certificate".to_vec()],
+            },
             chain_warning: None,
-            request: None,
         }
     }
 
     fn cert(alias: &str) -> KeystoreEntry {
         KeystoreEntry {
             alias: alias.into(),
-            kind: "Trusted certificate",
             certificate: None,
-            certificates: vec![b"opaque synthetic certificate".to_vec()],
+            content: Content::Certificates {
+                kind: Kind::TrustedCertificate,
+                certificates: vec![b"opaque synthetic certificate".to_vec()],
+            },
             chain_warning: None,
-            request: None,
         }
     }
 
     fn fixture_cert(alias: &str) -> KeystoreEntry {
         KeystoreEntry {
             certificate: Some(fixture_summary()),
-            certificates: vec![fixture_certificate_der().to_vec()],
+            content: Content::Certificates {
+                kind: Kind::TrustedCertificate,
+                certificates: vec![fixture_certificate_der().to_vec()],
+            },
             ..cert(alias)
         }
     }
@@ -343,10 +397,13 @@ mod tests {
             load_entries(&data.finish(""), "").unwrap(),
             [KeystoreEntry {
                 certificate: Some(fixture_summary()),
-                certificates: vec![
-                    fixture_certificate_der().to_vec(),
-                    b"opaque synthetic certificate".to_vec()
-                ],
+                content: Content::Certificates {
+                    kind: Kind::PrivateKey,
+                    certificates: vec![
+                        fixture_certificate_der().to_vec(),
+                        b"opaque synthetic certificate".to_vec()
+                    ],
+                },
                 ..key("key")
             }]
         );
@@ -472,7 +529,10 @@ mod tests {
         assert_eq!(
             load_entries(&builder.finish(""), "").unwrap(),
             [KeystoreEntry {
-                certificates: vec![],
+                content: Content::Certificates {
+                    kind: Kind::PrivateKey,
+                    certificates: vec![],
+                },
                 ..key("key")
             }]
         );
@@ -622,11 +682,12 @@ mod tests {
     fn secret(alias: &str) -> KeystoreEntry {
         KeystoreEntry {
             alias: alias.into(),
-            kind: "Secret key",
             certificate: None,
-            certificates: vec![],
+            content: Content::Certificates {
+                kind: Kind::SecretKey,
+                certificates: vec![],
+            },
             chain_warning: None,
-            request: None,
         }
     }
 
